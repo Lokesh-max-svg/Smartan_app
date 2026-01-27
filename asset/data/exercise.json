@@ -1,0 +1,166 @@
+{
+  "exercises": {
+    "Chest": [
+      {
+        "name": "Push-Up",
+        "category": "Bodyweight",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Bench Press",
+        "category": "Strength",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Incline Dumbbell Press",
+        "category": "Strength",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Chest Fly",
+        "category": "Machine",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Cable Crossover",
+        "category": "Cable",
+        "difficulty": "Advanced"
+      }
+    ],
+    "Back": [
+      {
+        "name": "Pull-Up",
+        "category": "Bodyweight",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Lat Pulldown",
+        "category": "Machine",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Deadlift",
+        "category": "Strength",
+        "difficulty": "Advanced"
+      },
+      {
+        "name": "Seated Row",
+        "category": "Machine",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Bent Over Row",
+        "category": "Strength",
+        "difficulty": "Advanced"
+      }
+    ],
+    "Shoulders": [
+      {
+        "name": "Overhead Press",
+        "category": "Strength",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Lateral Raise",
+        "category": "Dumbbell",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Front Raise",
+        "category": "Dumbbell",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Arnold Press",
+        "category": "Dumbbell",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Face Pull",
+        "category": "Cable",
+        "difficulty": "Intermediate"
+      }
+    ],
+    "Arms": [
+      {
+        "name": "Bicep Curl",
+        "category": "Dumbbell",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Tricep Pushdown",
+        "category": "Cable",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Hammer Curl",
+        "category": "Dumbbell",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Skull Crusher",
+        "category": "Barbell",
+        "difficulty": "Advanced"
+      },
+      {
+        "name": "Concentration Curl",
+        "category": "Dumbbell",
+        "difficulty": "Intermediate"
+      }
+    ],
+    "Legs": [
+      {
+        "name": "Squat",
+        "category": "Strength",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Lunges",
+        "category": "Bodyweight",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Leg Press",
+        "category": "Machine",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Leg Extension",
+        "category": "Machine",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Hamstring Curl",
+        "category": "Machine",
+        "difficulty": "Beginner"
+      }
+    ],
+    "Abs": [
+      {
+        "name": "Crunches",
+        "category": "Bodyweight",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Plank",
+        "category": "Bodyweight",
+        "difficulty": "Beginner"
+      },
+      {
+        "name": "Leg Raise",
+        "category": "Bodyweight",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Russian Twist",
+        "category": "Bodyweight",
+        "difficulty": "Intermediate"
+      },
+      {
+        "name": "Mountain Climbers",
+        "category": "Bodyweight",
+        "difficulty": "Intermediate"
+      }
+    ]
+  }
+}

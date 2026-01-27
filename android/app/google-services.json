@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "673689510832",
+    "project_id": "smartan-fitness",
+    "storage_bucket": "smartan-fitness.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:673689510832:android:8edad0c216052f72d0ec75",
+        "android_client_info": {
+          "package_name": "com.example.smartan_fitness"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "673689510832-k7nel7nbvkd68ccduhsmmava6c2f1a0l.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.example.smartan_fitness",
+            "certificate_hash": "0545956dce01e257507088146c90a2ea41377d96"
+          }
+        },
+        {
+          "client_id": "673689510832-70cgia5qjl099s2umgp9vdjusqhinc2g.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDOZgyteJmcgw3nYHg7ImrXLLw9NuUbKsw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "673689510832-70cgia5qjl099s2umgp9vdjusqhinc2g.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "673689510832-4k8k2q7ch7g0kpfv717g9nivnqjklorn.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.smartanFitness"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
