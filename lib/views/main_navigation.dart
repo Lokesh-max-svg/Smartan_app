@@ -5,7 +5,7 @@ import '../services/gym_service.dart';
 import 'home_page.dart';
 import 'workouts_page.dart';
 import 'progress_page.dart';
-import 'nutrition_page.dart';
+import 'tutorial_page.dart';
 import 'profile_page.dart';
 
 class MainNavigation extends StatefulWidget {
@@ -26,7 +26,7 @@ class _MainNavigationState extends State<MainNavigation> with WidgetsBindingObse
     const HomePage(),
     const WorkoutsPage(),
     const ProgressPage(),
-    const NutritionPage(),
+    const TutorialPage(),
     const ProfilePage(),
   ];
 
