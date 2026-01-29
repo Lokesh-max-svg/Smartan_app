@@ -89,17 +89,18 @@ class MuscleDistributionChart extends StatelessWidget {
   }
 
   List<Color> _getMuscleColors() {
+    // Smartan Fitness color palette - variations of teal and green
     return [
-      const Color(0xFF0D4F48), // Teal (primary)
+      const Color(0xFF0D4F48), // Dark teal (primary)
+      const Color(0xFF1A7B6E), // Medium teal
+      const Color(0xFF2DA896), // Light teal
+      const Color(0xFF5FD4B8), // Mint green
       const Color(0xFFA4FEB7), // Light green (secondary)
-      Colors.blue,
-      Colors.orange,
-      Colors.purple,
-      Colors.red,
-      Colors.cyan,
-      Colors.amber,
-      Colors.indigo,
-      Colors.pink,
+      const Color(0xFF7AE6A0), // Medium green
+      const Color(0xFF4FD18A), // Forest green
+      const Color(0xFF166B5E), // Deep teal
+      const Color(0xFF0F635A), // Darker teal
+      const Color(0xFFC8FED4), // Pale mint
     ];
   }
 }
