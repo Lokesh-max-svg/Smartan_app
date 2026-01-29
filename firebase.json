@@ -1,1 +1,40 @@
-{"flutter":{"platforms":{"android":{"default":{"projectId":"smartan-fitness","appId":"1:673689510832:android:8edad0c216052f72d0ec75","fileOutput":"android/app/google-services.json"}},"dart":{"lib/firebase_options.dart":{"projectId":"smartan-fitness","configurations":{"android":"1:673689510832:android:8edad0c216052f72d0ec75","ios":"1:673689510832:ios:21e9a60b02cb71e7d0ec75"}}}}}}
+{
+  "flutter": {
+    "platforms": {
+      "android": {
+        "default": {
+          "projectId": "smartan-fitness",
+          "appId": "1:673689510832:android:8edad0c216052f72d0ec75",
+          "fileOutput": "android/app/google-services.json"
+        }
+      },
+      "dart": {
+        "lib/firebase_options.dart": {
+          "projectId": "smartan-fitness",
+          "configurations": {
+            "android": "1:673689510832:android:8edad0c216052f72d0ec75",
+            "ios": "1:673689510832:ios:21e9a60b02cb71e7d0ec75"
+          }
+        }
+      }
+    }
+  },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "disallowLegacyRuntimeConfig": true,
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log",
+        "*.local"
+      ],
+      "predeploy": [
+        "npm --prefix \"$RESOURCE_DIR\" run lint",
+        "npm --prefix \"$RESOURCE_DIR\" run build"
+      ]
+    }
+  ]
+}

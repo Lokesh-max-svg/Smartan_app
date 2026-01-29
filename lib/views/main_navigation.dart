@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../services/user_profile_service.dart';
 import '../services/gym_service.dart';
 import 'home_page.dart';
-import 'workouts_page.dart';
+import 'trends_page.dart';
 import 'progress_page.dart';
 import 'tutorial_page.dart';
 import 'profile_page.dart';
@@ -24,7 +24,7 @@ class _MainNavigationState extends State<MainNavigation> with WidgetsBindingObse
 
   final List<Widget> _pages = [
     const HomePage(),
-    const WorkoutsPage(),
+    const TrendsPage(),
     const ProgressPage(),
     const TutorialPage(),
     const ProfilePage(),
