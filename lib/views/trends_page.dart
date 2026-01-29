@@ -3,13 +3,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import '../services/trends_service.dart';
 import '../models/exercise_frequency.dart';
-import '../models/progress_metric.dart';
 import '../models/activity_day.dart';
 import '../models/session_summary.dart';
 import '../widgets/trends/time_filter_chips.dart';
 import '../widgets/trends/trends_summary_cards.dart';
 import '../widgets/trends/muscle_distribution_chart.dart';
-import '../widgets/trends/progress_line_chart.dart';
 import '../widgets/trends/activity_heatmap.dart';
 import '../widgets/trends/session_history_list.dart';
 import 'session_analytics_page.dart';
@@ -33,7 +31,6 @@ class _TrendsPageState extends State<TrendsPage> {
 
   // Data
   List<ExerciseFrequency> _exerciseFrequencies = [];
-  Map<String, List<ProgressMetric>> _progressMetrics = {};
   List<ActivityDay> _activityDays = [];
   List<SessionSummary> _sessionHistory = [];
 
@@ -69,7 +66,6 @@ class _TrendsPageState extends State<TrendsPage> {
 
       setState(() {
         _exerciseFrequencies = data['exerciseFrequency'] as List<ExerciseFrequency>;
-        _progressMetrics = data['progressMetrics'] as Map<String, List<ProgressMetric>>;
         _activityDays = data['activityCalendar'] as List<ActivityDay>;
         _sessionHistory = data['sessionHistory'] as List<SessionSummary>;
 
@@ -280,16 +276,6 @@ class _TrendsPageState extends State<TrendsPage> {
                               icon: Icons.pie_chart,
                               child: MuscleDistributionChart(
                                 muscleGroups: _getMuscleGroupDistribution(),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-
-                            // Progress Over Time
-                            _buildSection(
-                              title: 'Progress Over Time',
-                              icon: Icons.show_chart,
-                              child: ProgressLineChart(
-                                progressMetrics: _progressMetrics,
                               ),
                             ),
                             const SizedBox(height: 24),
