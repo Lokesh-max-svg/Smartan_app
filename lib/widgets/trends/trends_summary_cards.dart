@@ -29,16 +29,6 @@ class TrendsSummaryCards extends StatelessWidget {
         Expanded(
           child: _buildSummaryCard(
             context,
-            'Exercises',
-            totalExercises.toString(),
-            Icons.format_list_numbered,
-            const Color(0xFF0D4F48),
-          ),
-        ),
-        const SizedBox(width: 12),
-        Expanded(
-          child: _buildSummaryCard(
-            context,
             'Completion',
             '${avgCompletionRate.toStringAsFixed(0)}%',
             Icons.check_circle_outline,
@@ -76,27 +66,36 @@ class TrendsSummaryCards extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(
-            icon,
-            color: color,
-            size: 24,
-          ),
           const SizedBox(height: 8),
-          Text(
-            value,
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-              color: color,
+          Center(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
             ),
           ),
           const SizedBox(height: 4),
-          Text(
-            title,
-            style: TextStyle(
-              fontSize: 12,
-              color: Colors.grey[600],
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                color: color,
+                size: 14,
+              ),
+              SizedBox(width: 5,),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey[600],
+                ),
+              ),
+            ],
           ),
         ],
       ),
