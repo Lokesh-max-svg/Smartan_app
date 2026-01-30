@@ -598,8 +598,8 @@ class _ProgressPageState extends State<ProgressPage> {
                               // View button - route based on status
                               TextButton(
                                 onPressed: () {
-                                  // Navigate to analytics page if completed/closed, else to embedding page
-                                  if (session['status'] == 'Completed' || session['status'] == 'Closed') {
+                                  // Navigate to analytics page if closed, else to embedding page
+                                  if (session['status'] == 'Closed') {
                                     Navigator.push(
                                       context,
                                       MaterialPageRoute(
@@ -608,7 +608,10 @@ class _ProgressPageState extends State<ProgressPage> {
                                           sessionDocId: session['id'],
                                         ),
                                       ),
-                                    );
+                                    ).then((_) {
+                                      // Refresh sessions when returning from analytics page
+                                      _loadSessions();
+                                    });
                                   } else {
                                     Navigator.push(
                                       context,
@@ -618,7 +621,10 @@ class _ProgressPageState extends State<ProgressPage> {
                                           sessionDocId: session['id'],
                                         ),
                                       ),
-                                    );
+                                    ).then((_) {
+                                      // Refresh sessions when returning (e.g., after ending session)
+                                      _loadSessions();
+                                    });
                                   }
                                 },
                                 style: TextButton.styleFrom(

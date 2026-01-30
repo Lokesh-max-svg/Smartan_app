@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import 'exercise_playback_page.dart';
 
 class SessionAnalyticsPage extends StatefulWidget {
   final String sessionId;
@@ -307,23 +308,37 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                     itemBuilder: (context, index) {
                       final exercise = exercises[index];
                       final isCompleted = exercise['completed'] == true;
+                      final hasGcsFolders = exercise['gcs_folders'] != null &&
+                          (exercise['gcs_folders'] as List).isNotEmpty;
 
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        padding: const EdgeInsets.all(14),
-                        decoration: BoxDecoration(
-                          color: isCompleted
-                              ? Colors.green.withOpacity(0.05)
-                              : Colors.grey[50],
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
+                      return GestureDetector(
+                        onTap: () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (context) => ExercisePlaybackPage(
+                                exercise: Map<String, dynamic>.from(exercise),
+                                sessionId: widget.sessionId,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
                             color: isCompleted
-                                ? Colors.green.withOpacity(0.3)
-                                : Colors.grey[200]!,
-                            width: 1.5,
+                                ? Colors.green.withOpacity(0.05)
+                                : Colors.grey[50],
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: isCompleted
+                                  ? Colors.green.withOpacity(0.3)
+                                  : Colors.grey[200]!,
+                              width: 1.5,
+                            ),
                           ),
-                        ),
-                        child: Row(
+                          child: Row(
                           children: [
                             // Exercise Image
                             Container(
@@ -371,25 +386,61 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                                     ),
                                   ),
                                   const SizedBox(height: 6),
-                                  if (exercise['muscle_name'] != null)
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 3,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFF0D4F48).withOpacity(0.1),
-                                        borderRadius: BorderRadius.circular(4),
-                                      ),
-                                      child: Text(
-                                        exercise['muscle_name'],
-                                        style: const TextStyle(
-                                          fontSize: 11,
-                                          color: Color(0xFF0D4F48),
-                                          fontWeight: FontWeight.w600,
+                                  Row(
+                                    children: [
+                                      if (exercise['muscle_name'] != null)
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF0D4F48).withOpacity(0.1),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            exercise['muscle_name'],
+                                            style: const TextStyle(
+                                              fontSize: 11,
+                                              color: Color(0xFF0D4F48),
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
                                         ),
-                                      ),
-                                    ),
+                                      if (hasGcsFolders) ...[
+                                        const SizedBox(width: 8),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: Colors.blue.withOpacity(0.1),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: const Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Icon(
+                                                Icons.play_circle_outline,
+                                                size: 12,
+                                                color: Colors.blue,
+                                              ),
+                                              SizedBox(width: 4),
+                                              Text(
+                                                'View',
+                                                style: TextStyle(
+                                                  fontSize: 11,
+                                                  color: Colors.blue,
+                                                  fontWeight: FontWeight.w600,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
                                   const SizedBox(height: 6),
                                   Row(
                                     children: [
@@ -440,6 +491,7 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                               ),
                             ),
                           ],
+                        ),
                         ),
                       );
                     },

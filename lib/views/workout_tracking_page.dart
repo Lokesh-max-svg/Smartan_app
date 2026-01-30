@@ -412,7 +412,7 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
               .doc(widget.sessionDocId)
               .update({
             'exercises': updatedExercises,
-            'status': 'Completed',
+            'status': 'Closed',
             'endedAt': FieldValue.serverTimestamp(),
           });
 
@@ -423,7 +423,7 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
               .collection('sessions')
               .doc(widget.sessionDocId)
               .update({
-            'status': 'Completed',
+            'status': 'Closed',
             'endedAt': FieldValue.serverTimestamp(),
           });
         }
@@ -433,7 +433,7 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
             .collection('sessions')
             .doc(widget.sessionDocId)
             .update({
-          'status': 'Completed',
+          'status': 'Closed',
           'endedAt': FieldValue.serverTimestamp(),
         });
       }
@@ -441,18 +441,54 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
       debugPrint('Session ${widget.sessionId} ended successfully');
 
       if (mounted) {
-        // Show success message
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Session ended successfully'),
-            backgroundColor: Colors.green,
-            duration: Duration(seconds: 2),
+        // Show closing dialog with spinner
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (context) => PopScope(
+            canPop: false,
+            child: AlertDialog(
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+              content: const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(color: Color(0xFF0D4F48)),
+                  SizedBox(height: 20),
+                  Text(
+                    'Closing session...',
+                    style: TextStyle(fontSize: 16),
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Please wait while we save your workout data',
+                    style: TextStyle(fontSize: 12, color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                ],
+              ),
+            ),
           ),
         );
 
-        // Navigate back after a short delay
-        await Future.delayed(const Duration(milliseconds: 500));
+        // Wait for Firestore to sync before navigating
+        await Future.delayed(const Duration(seconds: 3));
+
         if (mounted) {
+          // Close the loading dialog
+          Navigator.of(context).pop();
+
+          // Show success message
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Session ended successfully'),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+
+          // Navigate back
           Navigator.of(context).pop();
         }
       }
