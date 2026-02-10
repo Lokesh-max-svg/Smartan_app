@@ -62,10 +62,6 @@ async function getGcsFoldersForSession(
       .where("session_id", "==", sessionId)
       .get();
 
-    console.log(
-      `  Found ${snapshot.size} current_workout docs for session ${sessionId}`
-    );
-
     // Group folders by exercise name
     const exerciseFolders = new Map<string, GcsFolderInfo[]>();
 
@@ -93,10 +89,6 @@ async function getGcsFoldersForSession(
           const existing = exerciseFolders.get(exerciseName) || [];
           existing.push(folderInfo);
           exerciseFolders.set(exerciseName, existing);
-
-          console.log(
-            `    Found folder for ${exerciseName}: batch ${parsed.batch}`
-          );
         }
       }
     });
@@ -176,33 +168,20 @@ export const updateCompletedStatus = onSchedule({
   }
 });
 
-// Runs every 1 minute (minimum for Cloud Scheduler)
+// Runs every 5 minutes
 // Checks and updates exercise completion status based on current_reps vs reps
 // Also aggregates GCS folder data for each exercise
 export const updateExerciseCompletion = onSchedule({
-  schedule: "* * * * *", // Every 1 minute
+  schedule: "*/2 * * * *", // Every 2 minutes (reduced from 1 min to save costs)
   timeZone: "America/New_York",
 }, async () => {
   const db = admin.firestore();
 
   try {
-    // Get ALL sessions first to see what statuses exist
-    const allSnapshot = await db.collection("sessions").limit(10).get();
-
-    console.log(`Total sessions (first 10): ${allSnapshot.size}`);
-
-    if (!allSnapshot.empty) {
-      const statuses = new Set<string>();
-      allSnapshot.docs.forEach((doc) => {
-        const status = doc.data().status;
-        if (status) statuses.add(status);
-      });
-      console.log(`Unique statuses found: ${Array.from(statuses).join(", ")}`);
-    }
-
-    // Query all sessions that might have incomplete exercises
+    // Only query Active sessions (Closed sessions don't need frequent updates)
+    // This significantly reduces Firestore reads
     const snapshot = await db.collection("sessions")
-      .where("status", "in", ["Active", "Closed", "active", "closed"])
+      .where("status", "in", ["Active", "active"])
       .get();
 
     console.log(`Found ${snapshot.size} sessions to check`);
@@ -224,22 +203,40 @@ export const updateExerciseCompletion = onSchedule({
       const userId = data.userId || "";
       const sessionId = data.sessionId || "";
 
+      // Skip sessions with no exercises
+      if (exercises.length === 0) {
+        continue;
+      }
+
+      // Check if all exercises are already completed with GCS folders
+      // If so, skip the expensive nested query
+      const allCompleted = exercises.every((ex) =>
+        ex.completed === true && (ex.gcs_folders?.length > 0 || ex.reps === 0)
+      );
+      if (allCompleted) {
+        console.log(`Session ${doc.id}: All exercises complete, skipping`);
+        continue;
+      }
+
       console.log(
         `Session ${doc.id}: ${exercises.length} exercises, ` +
-        `status: ${data.status}, userId: ${userId}, sessionId: ${sessionId}`
+        `status: ${data.status}`
       );
 
-      // Get GCS folders for this session
+      // Check if any exercise needs GCS folder data
+      const needsGcsFolders = exercises.some((ex) =>
+        !ex.gcs_folders || ex.gcs_folders.length === 0
+      );
+
+      // Only query current_workout if exercises need GCS folder data
+      // This avoids expensive reads when folders are already populated
       let gcsFolders = new Map<string, GcsFolderInfo[]>();
-      if (userId && sessionId) {
+      if (needsGcsFolders && userId && sessionId) {
         gcsFolders = await getGcsFoldersForSession(sessionId);
-        console.log(
-          `  Found GCS folders for ${gcsFolders.size} exercises`
-        );
       }
 
       let hasUpdates = false;
-      const updatedExercises = exercises.map((exercise, idx) => {
+      const updatedExercises = exercises.map((exercise) => {
         const currentReps = exercise.current_reps || 0;
         const targetReps = exercise.reps || 0;
         const isCompleted = exercise.completed || false;
@@ -247,14 +244,6 @@ export const updateExerciseCompletion = onSchedule({
 
         // Normalize exercise name for matching with GCS folder names
         const normalizedName = normalizeExerciseName(exerciseName);
-
-        if (idx === 0) {
-          console.log(
-            `  First exercise: ${exerciseName} (${normalizedName}), ` +
-            `current_reps=${currentReps}, reps=${targetReps}, ` +
-            `completed=${isCompleted}`
-          );
-        }
 
         // Check if there are new GCS folders for this exercise
         const folders = gcsFolders.get(normalizedName) || [];
@@ -277,22 +266,8 @@ export const updateExerciseCompletion = onSchedule({
           targetReps > 0;
 
         if (shouldComplete || hasNewFolders) {
-          if (shouldComplete) {
-            console.log(
-              `  Marking exercise ${exerciseName} as completed ` +
-              `(${currentReps}/${targetReps})`
-            );
-            exerciseUpdateCount++;
-          }
-
-          if (hasNewFolders) {
-            console.log(
-              `  Updating GCS folders for ${exerciseName}: ` +
-              `${folders.length} folders`
-            );
-            gcsFolderUpdateCount++;
-          }
-
+          if (shouldComplete) exerciseUpdateCount++;
+          if (hasNewFolders) gcsFolderUpdateCount++;
           hasUpdates = true;
           return {
             ...exercise,

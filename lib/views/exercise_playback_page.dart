@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:archive/archive.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:math' as math;
@@ -71,6 +72,9 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
   // Show controls panel
   bool _showControls = false;
 
+  // Weight per recording (extracted from filename)
+  List<double> _recordingWeights = [];
+
   // Cache expiry: 7 days
   static const int _cacheExpiryDays = 7;
 
@@ -90,7 +94,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
   Future<Directory> _getCacheDirectory() async {
     final appDir = await getApplicationDocumentsDirectory();
     final exerciseName = (widget.exercise['name'] ?? 'unknown').toString().replaceAll(' ', '_');
-    final cacheDir = Directory('${appDir.path}/smpl_cache/${widget.sessionId}/$exerciseName');
+    final cacheDir = Directory('${appDir.path}/pose_cache/${widget.sessionId}/$exerciseName');
     if (!await cacheDir.exists()) {
       await cacheDir.create(recursive: true);
     }
@@ -101,7 +105,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
   Future<void> _cleanOldCache() async {
     try {
       final appDir = await getApplicationDocumentsDirectory();
-      final cacheRootDir = Directory('${appDir.path}/smpl_cache');
+      final cacheRootDir = Directory('${appDir.path}/pose_cache');
 
       if (!await cacheRootDir.exists()) return;
 
@@ -178,6 +182,12 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
       final metaJson = jsonDecode(await metaFile.readAsString());
       final frameCount = metaJson['frameCount'] as int;
       final recordingBoundaries = List<int>.from(metaJson['recordingBoundaries']);
+      final recordingWeights = List<double>.from(
+        (metaJson['recordingWeights'] as List<dynamic>?)?.map((e) => (e as num).toDouble()) ?? []
+      );
+
+      // Set the weights from cache
+      _recordingWeights = recordingWeights;
 
       setState(() {
         _loadingStatus = 'Loading from cache...';
@@ -189,7 +199,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
       for (int i = 0; i < frameCount; i++) {
         final frameFile = File('${cacheDir.path}/frame_$i.bin');
         final bytes = await frameFile.readAsBytes();
-        final vertices = _parseSMPLVertices(bytes);
+        final vertices = _parseVertices(bytes);
 
         // Determine recording index from boundaries
         int recordingIndex = 0;
@@ -218,7 +228,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         _loadedFromCache = true;
       });
 
-      debugPrint('Loaded $frameCount frames from cache');
+      debugPrint('Loaded $frameCount frames from cache, weights: $_recordingWeights');
       return true;
     } catch (e) {
       debugPrint('Error loading from cache: $e');
@@ -243,6 +253,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         'cachedAt': DateTime.now().toIso8601String(),
         'frameCount': rawFrames.length,
         'recordingBoundaries': recordingBoundaries,
+        'recordingWeights': _recordingWeights,
         'sessionId': widget.sessionId,
         'exerciseName': widget.exercise['name'],
       }));
@@ -253,23 +264,142 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
     }
   }
 
-  // Number of concurrent downloads
-  static const int _parallelDownloads = 20;
-
   /// Load all frames - checks cache first, then downloads from Firebase
   Future<void> _loadAllFrames() async {
     // Clean old cache files in background
     _cleanOldCache();
 
-    final folders = widget.exercise['gcs_folders'] as List<dynamic>? ?? [];
-    _gcsFolders = folders.map((f) => Map<String, dynamic>.from(f)).toList();
+    debugPrint('=== Loading frames for session: ${widget.sessionId} ===');
+    debugPrint('Exercise name: ${widget.exercise['name']}');
+    debugPrint('Exercise data: ${widget.exercise}');
 
-    // Log folder info before sorting
-    debugPrint('=== GCS Folders before sorting ===');
-    for (int i = 0; i < _gcsFolders.length; i++) {
-      final f = _gcsFolders[i];
-      debugPrint('  [$i] batch: ${f['batch']}, timestamp: ${f['timestamp']}, path: ${f['path']}');
+    var folders = widget.exercise['gcs_folders'] as List<dynamic>? ?? [];
+    debugPrint('Initial gcs_folders from widget: ${folders.length}');
+
+    // If no gcs_folders in exercise data, fetch from Firestore sessions collection
+    String? userId;
+    if (folders.isEmpty) {
+      setState(() {
+        _loadingStatus = 'Fetching recording data...';
+      });
+
+      try {
+        debugPrint('Fetching session with sessionId: ${widget.sessionId}');
+
+        // First try to get by document ID
+        var sessionDoc = await FirebaseFirestore.instance
+            .collection('sessions')
+            .doc(widget.sessionId)
+            .get();
+
+        // If not found by doc ID, query by sessionId field
+        if (!sessionDoc.exists) {
+          debugPrint('Not found by doc ID, querying by sessionId field...');
+          final querySnapshot = await FirebaseFirestore.instance
+              .collection('sessions')
+              .where('sessionId', isEqualTo: widget.sessionId)
+              .limit(1)
+              .get();
+
+          if (querySnapshot.docs.isNotEmpty) {
+            sessionDoc = querySnapshot.docs.first;
+            debugPrint('Found session by sessionId field: ${sessionDoc.id}');
+          }
+        }
+
+        debugPrint('Session doc exists: ${sessionDoc.exists}');
+        if (sessionDoc.exists) {
+          final sessionData = sessionDoc.data();
+          userId = sessionData?['userId'] as String?;
+          debugPrint('UserId from session: $userId');
+          debugPrint('Session data keys: ${sessionData?.keys.toList()}');
+
+          final exercises = sessionData?['exercises'] as List<dynamic>? ?? [];
+          final exerciseName = widget.exercise['name'] as String? ?? '';
+          final normalizedExerciseName = exerciseName.toLowerCase().replaceAll(' ', '_');
+          debugPrint('Looking for exercise: $exerciseName (normalized: $normalizedExerciseName) in ${exercises.length} exercises');
+
+          // Find matching exercise by name
+          for (final ex in exercises) {
+            final exMap = ex as Map<String, dynamic>;
+            final exName = exMap['name'] as String? ?? '';
+            final normalizedExName = exName.toLowerCase().replaceAll(' ', '_');
+            debugPrint('  Checking: $exName (normalized: $normalizedExName) - gcs_folders: ${(exMap['gcs_folders'] as List?)?.length ?? 0}');
+
+            // Match by exact name or normalized name
+            if (exName == exerciseName || normalizedExName == normalizedExerciseName) {
+              folders = exMap['gcs_folders'] as List<dynamic>? ?? [];
+              debugPrint('Fetched ${folders.length} gcs_folders from Firestore for $exerciseName');
+              break;
+            }
+          }
+
+          // If still no folders, check if gcs_folders exist at session level (legacy format)
+          if (folders.isEmpty) {
+            final sessionGcsFolders = sessionData?['gcs_folders'] as List<dynamic>? ?? [];
+            if (sessionGcsFolders.isNotEmpty) {
+              debugPrint('Found ${sessionGcsFolders.length} gcs_folders at session level');
+              // Filter by exercise name
+              final filteredFolders = <dynamic>[];
+              for (final folder in sessionGcsFolders) {
+                final folderMap = folder as Map<String, dynamic>;
+                final path = folderMap['path'] as String? ?? '';
+                if (path.contains(normalizedExerciseName)) {
+                  filteredFolders.add(folder);
+                }
+              }
+              folders = filteredFolders;
+              debugPrint('Filtered to ${folders.length} folders for $exerciseName');
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Error fetching gcs_folders from Firestore: $e');
+      }
     }
+
+    // Fallback: scan Storage directly if no gcs_folders found
+    debugPrint('After Firestore fetch - folders: ${folders.length}, userId: $userId');
+    if (folders.isEmpty && userId != null) {
+      setState(() {
+        _loadingStatus = 'Scanning storage for recordings...';
+      });
+
+      try {
+        final exerciseName = (widget.exercise['name'] as String? ?? '').toLowerCase().replaceAll(' ', '_');
+        final storagePath = 'pose_data/$userId/${widget.sessionId}';
+        debugPrint('Scanning storage: $storagePath for exercise: $exerciseName');
+
+        final storageRef = _storage.ref(storagePath);
+        final listResult = await storageRef.listAll();
+
+        // Filter folders matching this exercise name
+        final matchingFolders = <Map<String, dynamic>>[];
+        for (final prefix in listResult.prefixes) {
+          final folderName = prefix.name;
+          // Pattern: exerciseName_cam_X_X_timestamp (e.g., front_raise_cam_1_6_1770706423)
+          if (folderName.startsWith(exerciseName)) {
+            final parsed = _parseGcsFolderName(folderName);
+            if (parsed != null) {
+              matchingFolders.add({
+                'path': '$storagePath/$folderName',
+                'camera': parsed['camera'],
+                'batch': parsed['batch'],
+                'timestamp': parsed['timestamp'],
+              });
+              debugPrint('Found folder: $folderName -> batch ${parsed['batch']}');
+            }
+          }
+        }
+
+        folders = matchingFolders;
+        debugPrint('Found ${folders.length} folders from Storage scan');
+      } catch (e) {
+        debugPrint('Error scanning storage: $e');
+      }
+    }
+
+    _gcsFolders = folders.map((f) => Map<String, dynamic>.from(f)).toList();
 
     // Sort by batch number first (primary), then by timestamp (secondary)
     _gcsFolders.sort((a, b) {
@@ -278,18 +408,10 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
       if (batchA != batchB) {
         return batchA.compareTo(batchB);
       }
-      // If batch is the same, sort by timestamp
       final timestampA = a['timestamp'] as int? ?? 0;
       final timestampB = b['timestamp'] as int? ?? 0;
       return timestampA.compareTo(timestampB);
     });
-
-    // Log folder info after sorting
-    debugPrint('=== GCS Folders after sorting ===');
-    for (int i = 0; i < _gcsFolders.length; i++) {
-      final f = _gcsFolders[i];
-      debugPrint('  [$i] batch: ${f['batch']}, timestamp: ${f['timestamp']}, path: ${f['path']}');
-    }
 
     if (_gcsFolders.isEmpty) {
       setState(() {
@@ -310,24 +432,175 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
       }
     }
 
-    // Download from Firebase
+    // Check if paths are in pose_data (new ZIP format) or old format (individual files)
+    final firstPath = _gcsFolders.first['path'] as String? ?? '';
+    final isNewFormat = firstPath.contains('pose_data') || firstPath.endsWith('.zip');
+
+    if (isNewFormat) {
+      await _loadFromZipFiles();
+    } else {
+      await _loadFromIndividualFiles();
+    }
+  }
+
+  /// Load frames from ZIP files (new optimized format - 1 download per recording)
+  Future<void> _loadFromZipFiles() async {
+    try {
+      setState(() {
+        _loadingStatus = 'Downloading recordings...';
+        _totalFiles = _gcsFolders.length;
+      });
+
+      List<_ParsedFrame> allFrames = [];
+      List<Uint8List> rawFramesForCache = [];
+      List<int> recordingBoundaries = [];
+
+      for (int i = 0; i < _gcsFolders.length; i++) {
+        final folder = _gcsFolders[i];
+        var path = folder['path'] as String;
+        final batch = folder['batch'] as int? ?? 0;
+
+        // If path doesn't end with .zip, look for ZIP file inside the folder
+        if (!path.endsWith('.zip')) {
+          final folderName = path.split('/').last;
+          path = '$path/$folderName.zip';
+        }
+
+        setState(() {
+          _loadingStatus = 'Downloading batch $batch (${i + 1}/${_gcsFolders.length})...';
+          _downloadedFiles = i;
+        });
+
+        debugPrint('Downloading ZIP: $path');
+
+        // Download the ZIP file (single request!)
+        final ref = _storage.ref(path);
+        final zipData = await ref.getData(50 * 1024 * 1024); // 50MB max
+
+        if (zipData == null) {
+          debugPrint('Failed to download ZIP: $path');
+          continue;
+        }
+
+        debugPrint('ZIP downloaded: ${zipData.length} bytes');
+
+        // Extract frames from ZIP
+        final archive = ZipDecoder().decodeBytes(zipData);
+
+        // Get .bin files and sort by frame number
+        final binFiles = archive.files
+            .where((f) => f.name.endsWith('.bin') && f.isFile)
+            .toList();
+
+        // Sort by frame number (extract number from filename)
+        binFiles.sort((a, b) {
+          final numA = _extractFrameNumber(a.name);
+          final numB = _extractFrameNumber(b.name);
+          return numA.compareTo(numB);
+        });
+
+        debugPrint('Extracted ${binFiles.length} frames from ZIP');
+
+        // Extract weight from first filename
+        double weight = 0.0;
+        if (binFiles.isNotEmpty) {
+          weight = _extractWeight(binFiles.first.name);
+          debugPrint('  Weight: ${weight > 0 ? "${weight}kg" : "N/A"}');
+        }
+        _recordingWeights.add(weight);
+
+        // Parse each frame
+        for (final file in binFiles) {
+          final content = file.content;
+          if (content.isEmpty) continue;
+
+          final bytes = Uint8List.fromList(content);
+          final decompressed = _decompressData(bytes);
+          final vertices = _parseVertices(decompressed);
+
+          rawFramesForCache.add(decompressed);
+          allFrames.add(_ParsedFrame(
+            vertices: vertices,
+            recordingIndex: i,
+          ));
+        }
+
+        // Track recording boundary
+        recordingBoundaries.add(allFrames.length);
+      }
+
+      // Save to cache
+      if (rawFramesForCache.isNotEmpty) {
+        _saveToCache(rawFramesForCache, recordingBoundaries);
+      }
+
+      setState(() {
+        _allFrames = allFrames;
+        _isLoading = false;
+        _downloadedFiles = _gcsFolders.length;
+      });
+
+      debugPrint('Loaded ${allFrames.length} total frames from ${_gcsFolders.length} ZIP files');
+    } catch (e) {
+      debugPrint('Error loading from ZIP: $e');
+      setState(() {
+        _isLoading = false;
+        _errorMessage = 'Failed to load: $e';
+      });
+    }
+  }
+
+  /// Parse GCS folder name to extract camera, batch, timestamp
+  /// Format: {exercise_name}_cam_{camera}_{batch}_{timestamp}
+  /// e.g., "front_raise_cam_1_6_1770706423"
+  Map<String, int>? _parseGcsFolderName(String folderName) {
+    // Match pattern: anything_cam_X_X_timestamp
+    final match = RegExp(r'_cam_(\d+)_(\d+)_(\d+)$').firstMatch(folderName);
+    if (match == null) return null;
+
+    return {
+      'camera': int.tryParse(match.group(1) ?? '0') ?? 0,
+      'batch': int.tryParse(match.group(2) ?? '0') ?? 0,
+      'timestamp': int.tryParse(match.group(3) ?? '0') ?? 0,
+    };
+  }
+
+  /// Extract frame number from filename like "cam_1_track6_entry3_front_raise_5.0_frame0033.bin"
+  int _extractFrameNumber(String filename) {
+    final match = RegExp(r'frame(\d+)\.bin$').firstMatch(filename);
+    if (match != null) {
+      return int.tryParse(match.group(1) ?? '0') ?? 0;
+    }
+    return 0;
+  }
+
+  /// Extract weight from filename like "cam_1_track6_entry3_front_raise_5.0_frame0033.bin"
+  /// Returns the weight (e.g., 5.0) or 0.0 if not found
+  double _extractWeight(String filename) {
+    // Pattern: exercise_name_WEIGHT_frame where WEIGHT is like "5.0" or "10.5"
+    final match = RegExp(r'_(\d+\.?\d*)_frame\d+\.bin$').firstMatch(filename);
+    if (match != null) {
+      return double.tryParse(match.group(1) ?? '0') ?? 0.0;
+    }
+    return 0.0;
+  }
+
+  // Number of concurrent downloads (for legacy individual file downloads)
+  static const int _parallelDownloads = 20;
+
+  /// Load frames from individual files (legacy format - multiple downloads)
+  Future<void> _loadFromIndividualFiles() async {
     try {
       setState(() {
         _loadingStatus = 'Scanning recordings...';
       });
 
-      // First, scan all folders to get total file count
       List<_FileToDownload> allFilesToDownload = [];
 
       for (int i = 0; i < _gcsFolders.length; i++) {
         final folder = _gcsFolders[i];
         final path = folder['path'] as String;
-        final expectedFrames = folder['frames'] as int? ?? 0;
         final batch = folder['batch'] as int? ?? 0;
-
-        debugPrint('=== Scanning recording ${i + 1}/${_gcsFolders.length} ===');
-        debugPrint('  Path: $path');
-        debugPrint('  Batch: $batch, Expected frames: $expectedFrames');
 
         final ref = _storage.ref(path);
         final result = await ref.listAll();
@@ -335,18 +608,6 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         final binFiles = result.items.where((f) => f.name.endsWith('.bin')).toList();
         binFiles.sort((a, b) => a.name.compareTo(b.name));
 
-        debugPrint('  ✓ Actual bin files found: ${binFiles.length}');
-        if (binFiles.isEmpty) {
-          debugPrint('  ⚠️ WARNING: No bin files in this folder!');
-        } else if (binFiles.length != expectedFrames && expectedFrames > 0) {
-          debugPrint('  ⚠️ WARNING: Expected $expectedFrames but found ${binFiles.length}');
-        }
-        if (binFiles.isNotEmpty) {
-          debugPrint('  First file: ${binFiles.first.name}');
-          debugPrint('  Last file: ${binFiles.last.name}');
-        }
-
-        // Add to download list with recording index
         for (final file in binFiles) {
           allFilesToDownload.add(_FileToDownload(
             ref: file,
@@ -360,40 +621,11 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         });
       }
 
-      // Log summary of all folders
-      debugPrint('\n=== SCAN SUMMARY ===');
-      debugPrint('Total recordings: ${_gcsFolders.length}');
-      debugPrint('Total files to download: ${allFilesToDownload.length}');
-
-      // Check for any empty folders
-      final emptyFolders = <int>[];
-      int fileIndex = 0;
-      for (int i = 0; i < _gcsFolders.length; i++) {
-        int filesInFolder = 0;
-        while (fileIndex < allFilesToDownload.length &&
-               allFilesToDownload[fileIndex].recordingIndex == i) {
-          filesInFolder++;
-          fileIndex++;
-        }
-        if (filesInFolder == 0) {
-          emptyFolders.add(i);
-          debugPrint('⚠️ Recording ${i + 1} (Batch ${_gcsFolders[i]['batch']}) has NO FILES!');
-        }
-      }
-      if (emptyFolders.isEmpty) {
-        debugPrint('✓ All recordings have bin files');
-      } else {
-        debugPrint('⚠️ ${emptyFolders.length} recordings are EMPTY!');
-      }
-      debugPrint('===================\n');
-
       final totalCount = allFilesToDownload.length;
       setState(() {
         _totalFiles = totalCount;
         _loadingStatus = 'Downloading $totalCount frames...';
       });
-
-      debugPrint('Total files to download: $totalCount (parallel: $_parallelDownloads)');
 
       // Prepare result arrays (pre-sized for correct ordering)
       final results = List<_DownloadResult?>.filled(totalCount, null);
@@ -410,7 +642,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
             final data = await file.ref.getData(10 * 1024 * 1024);
             if (data != null) {
               final decompressed = _decompressData(data);
-              final vertices = _parseSMPLVertices(decompressed);
+              final vertices = _parseVertices(decompressed);
               return _DownloadResult(
                 globalIndex: file.globalIndex,
                 recordingIndex: file.recordingIndex,
@@ -503,7 +735,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
     return signedValue / scale;
   }
 
-  List<List<double>> _parseSMPLVertices(Uint8List data) {
+  List<List<double>> _parseVertices(Uint8List data) {
     final vertices = <List<double>>[];
 
     for (int i = 0; i < data.length - 5; i += 6) {
@@ -578,12 +810,12 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
     return 0;
   }
 
-  int get _currentTimestamp {
+  double get _currentWeight {
     final recIdx = _currentRecordingIndex;
-    if (recIdx >= 0 && recIdx < _gcsFolders.length) {
-      return _gcsFolders[recIdx]['timestamp'] as int? ?? 0;
+    if (recIdx >= 0 && recIdx < _recordingWeights.length) {
+      return _recordingWeights[recIdx];
     }
-    return 0;
+    return 0.0;
   }
 
   @override
@@ -657,6 +889,17 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
             '$sets',
             Icons.repeat,
             Colors.blueAccent,
+          ),
+          Container(
+            width: 1,
+            height: 32,
+            color: Colors.white24,
+          ),
+          _buildRepsStat(
+            'WEIGHT',
+            _currentWeight > 0 ? '${_currentWeight}kg' : '-',
+            Icons.fitness_center,
+            Colors.purple,
           ),
           Container(
             width: 1,
@@ -756,7 +999,9 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Batch: $_currentBatchNumber | T: $_currentTimestamp',
+                    _currentWeight > 0
+                        ? 'Weight: ${_currentWeight}kg'
+                        : 'Batch: $_currentBatchNumber',
                     style: const TextStyle(
                       color: Colors.white54,
                       fontSize: 9,
@@ -863,7 +1108,7 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
       },
       child: currentVertices.isNotEmpty
           ? CustomPaint(
-              painter: _SMPLMeshPainter(
+              painter: _PoseMeshPainter(
                 vertices: currentVertices,
                 rotationX: _rotationX,
                 rotationY: _rotationY,
@@ -1241,7 +1486,7 @@ class _DownloadResult {
   });
 }
 
-class _SMPLMeshPainter extends CustomPainter {
+class _PoseMeshPainter extends CustomPainter {
   final List<List<double>> vertices;
   final double rotationX;
   final double rotationY;
@@ -1250,7 +1495,7 @@ class _SMPLMeshPainter extends CustomPainter {
   final double density;
   final Color pointColor;
 
-  _SMPLMeshPainter({
+  _PoseMeshPainter({
     required this.vertices,
     required this.rotationX,
     required this.rotationY,
@@ -1353,7 +1598,7 @@ class _SMPLMeshPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _SMPLMeshPainter oldDelegate) {
+  bool shouldRepaint(covariant _PoseMeshPainter oldDelegate) {
     return oldDelegate.vertices != vertices ||
            oldDelegate.rotationX != rotationX ||
            oldDelegate.rotationY != rotationY ||
