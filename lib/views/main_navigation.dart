@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/user_profile_service.dart';
 import '../services/gym_service.dart';
 import 'home_page.dart';
@@ -16,7 +16,6 @@ class MainNavigation extends StatefulWidget {
 }
 
 class _MainNavigationState extends State<MainNavigation> with WidgetsBindingObserver {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
   final UserProfileService _profileService = UserProfileService();
   final GymService _gymService = GymService();
   int _currentIndex = 0;
@@ -56,11 +55,11 @@ class _MainNavigationState extends State<MainNavigation> with WidgetsBindingObse
       _isCheckingProfile = true;
     });
 
-    final currentUser = _auth.currentUser;
-
-    if (currentUser != null) {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isNotEmpty) {
       // Check if profile is completed
-      final isCompleted = await _profileService.isProfileCompleted(currentUser.uid);
+      final isCompleted = await _profileService.isProfileCompleted(userId!);
 
       if (!isCompleted) {
         // Profile not completed, redirect to user info page
@@ -71,7 +70,7 @@ class _MainNavigationState extends State<MainNavigation> with WidgetsBindingObse
       }
 
       // Check if user has any approved (active) gyms
-      final userDoc = await _gymService.getUserGymsWithDetails(currentUser.uid);
+      final userDoc = await _gymService.getUserGymsWithDetails(userId);
       final hasActiveGym = userDoc.any((gym) => gym['status'] == 0);
 
       if (!hasActiveGym) {

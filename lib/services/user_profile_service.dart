@@ -1,58 +1,25 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'api_client.dart';
 
+/// User Profile Service - Uses backend API instead of direct Firestore
 class UserProfileService {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
-  /// Check if user profile is completed in Firestore
+  /// Check if user profile is completed via backend API
   /// Returns true if profile exists with required fields, false otherwise
   Future<bool> isProfileCompleted(String userId) async {
     try {
-      final docSnapshot = await _firestore
-          .collection('users')
-          .doc(userId)
-          .get();
-
-      if (!docSnapshot.exists) {
-        return false;
-      }
-
-      final data = docSnapshot.data();
-      if (data == null) {
-        return false;
-      }
-
-      // Check if all required fields are present
-      final hasHeight = data.containsKey('heightInCm') && data['heightInCm'] != null;
-      final hasWeight = data.containsKey('weightInKg') && data['weightInKg'] != null;
-      final hasExpertise = data.containsKey('gymExpertise') && data['gymExpertise'] != null;
-      final hasHealthIssues = data.containsKey('hasHealthIssues') && data['hasHealthIssues'] != null;
-
-      return hasHeight && hasWeight && hasExpertise && hasHealthIssues;
+      final response = await ApiClient.checkProfileStatus(userId);
+      return response['isCompleted'] as bool? ?? false;
     } catch (e) {
       print('Error checking profile completion: $e');
       return false;
     }
   }
 
-  /// Get user status from Firestore
+  /// Get user status from backend API
   /// Returns: 0 = enabled, -1 = blocked, 1 = deleted, null = not found
   Future<int?> getUserStatus(String userId) async {
     try {
-      final docSnapshot = await _firestore
-          .collection('users')
-          .doc(userId)
-          .get();
-
-      if (!docSnapshot.exists) {
-        return null;
-      }
-
-      final data = docSnapshot.data();
-      if (data == null) {
-        return null;
-      }
-
-      return data['status'] as int? ?? 0; // Default to 0 (enabled) if not set
+      final response = await ApiClient.getUserStatus(userId);
+      return response['status'] as int?;
     } catch (e) {
       print('Error getting user status: $e');
       return null;
@@ -68,14 +35,21 @@ class UserProfileService {
   /// Initialize user with default fields (user_type and status)
   Future<void> initializeUser(String userId) async {
     try {
-      await _firestore.collection('users').doc(userId).set({
-        'user_type': 'user',
-        'status': 0, // 0 = enabled
-        'createdAt': DateTime.now().toIso8601String(),
-      }, SetOptions(merge: true));
+      await ApiClient.initializeUser(userId);
     } catch (e) {
       print('Error initializing user: $e');
       throw 'Error initializing user: $e';
+    }
+  }
+
+  /// Get full user profile
+  Future<Map<String, dynamic>?> getUserProfile(String userId) async {
+    try {
+      final response = await ApiClient.getUserProfile(userId);
+      return response['data'] as Map<String, dynamic>?;
+    } catch (e) {
+      print('Error getting user profile: $e');
+      return null;
     }
   }
 }

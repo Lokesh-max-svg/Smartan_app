@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import '../services/reid_monitor_service.dart';
+import '../services/api_client.dart';
 import 'workout_tracking_page.dart';
 
 class SessionEmbeddingPage extends StatefulWidget {
@@ -18,74 +19,59 @@ class SessionEmbeddingPage extends StatefulWidget {
 }
 
 class _SessionEmbeddingPageState extends State<SessionEmbeddingPage> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   int embeddingStatus = 0;
   bool isLoading = true;
-  Timer? _statusCheckTimer;
+  Timer? _pollingTimer;
 
   @override
   void initState() {
     super.initState();
-    _loadSessionStatus();
-    _startStatusPolling();
+    _setupListener();
   }
 
   @override
   void dispose() {
-    _statusCheckTimer?.cancel();
+    _pollingTimer?.cancel();
     super.dispose();
   }
 
-  void _startStatusPolling() {
-    _statusCheckTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if (embeddingStatus == 0) {
-        _loadSessionStatus();
-      } else {
-        // Stop polling once embedding is complete
-        timer.cancel();
-      }
+  void _setupListener() {
+    _pollSession();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _pollSession();
     });
   }
 
-  Future<void> _loadSessionStatus() async {
+  Future<void> _pollSession() async {
     try {
-      final sessionDoc = await _firestore
-          .collection('sessions')
-          .doc(widget.sessionDocId)
-          .get();
+      final response = await ApiClient.getSession(widget.sessionDocId);
+      final session = response['session'] as Map<String, dynamic>?;
+      final status = session?['embedding_status'] as int? ?? 0;
 
-      if (sessionDoc.exists) {
-        final data = sessionDoc.data();
-        setState(() {
-          embeddingStatus = data?['embedding_status'] ?? 0;
-          isLoading = false;
-        });
+      if (!mounted) return;
 
-        // Check if embedding_status is 1
-        if (embeddingStatus == 1) {
-          debugPrint('Embedding completed, navigating to workout tracking page');
-          if (mounted) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (context) => WorkoutTrackingPage(
-                  sessionId: widget.sessionId,
-                  sessionDocId: widget.sessionDocId,
-                ),
-              ),
-            );
-          }
-        }
-      } else {
-        setState(() {
-          isLoading = false;
-        });
-      }
-    } catch (e) {
-      debugPrint('Error loading session status: $e');
       setState(() {
+        embeddingStatus = status;
         isLoading = false;
       });
+
+      if (status == 1) {
+        _pollingTimer?.cancel();
+        debugPrint('Embedding completed, navigating to workout tracking page');
+        ReidMonitorService().startMonitoring(widget.sessionDocId);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => WorkoutTrackingPage(
+              sessionId: widget.sessionId,
+              sessionDocId: widget.sessionDocId,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error polling session: $e');
+      if (mounted) setState(() => isLoading = false);
     }
   }
 
@@ -244,22 +230,14 @@ class _SessionEmbeddingPageState extends State<SessionEmbeddingPage> {
 
                     const SizedBox(height: 30),
 
-                    // Refresh Button
+                    // Real-time status indicator
                     if (embeddingStatus == 0)
-                      ElevatedButton.icon(
-                        onPressed: _loadSessionStatus,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Check Status'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF0D4F48),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 30,
-                            vertical: 15,
-                          ),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                      const Text(
+                        'Listening for updates...',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey,
+                          fontStyle: FontStyle.italic,
                         ),
                       ),
                   ],

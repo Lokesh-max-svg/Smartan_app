@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/reid_monitor_service.dart';
+import '../services/api_client.dart';
 import 'session_embedding_page.dart';
 import 'session_analytics_page.dart';
 
@@ -13,19 +15,20 @@ class ProgressPage extends StatefulWidget {
 }
 
 class _ProgressPageState extends State<ProgressPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
   DateTime selectedDate = DateTime.now();
   late String todayDate;
+  String? _userId;
 
   List<Map<String, dynamic>> workouts = [];
   List<Map<String, dynamic>> sessions = [];
   bool isLoading = true;
+  String? _closingSessionId;
 
   int totalWorkouts = 0;
   int totalCalories = 0;
   double totalHours = 0.0;
+
+  Timer? _sessionsPollingTimer;
 
   @override
   void initState() {
@@ -34,62 +37,42 @@ class _ProgressPageState extends State<ProgressPage> {
     _loadData();
   }
 
+  @override
+  void dispose() {
+    _sessionsPollingTimer?.cancel();
+    super.dispose();
+  }
+
   void _updateDateStrings() {
     todayDate = DateFormat('yyyy-MM-dd').format(selectedDate);
   }
 
-
   Future<void> _loadData() async {
-    await Future.wait([
-      _loadWorkouts(),
-      _loadSessions(),
-    ]);
+    final prefs = await SharedPreferences.getInstance();
+    _userId = prefs.getString('user_id');
+
+    await _loadWorkouts();
+    await _fetchSessions();
+    _startSessionsPolling();
   }
 
   Future<void> _loadWorkouts() async {
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) {
+      if ((_userId ?? '').isEmpty) {
         setState(() {
           isLoading = false;
         });
         return;
       }
 
-      debugPrint('Loading workouts for user: ${currentUser.uid}, date: $todayDate');
-
-      // Query workout plans for this user
-      final snapshot = await _firestore
-          .collection('workoutPlans')
-          .where('userId', isEqualTo: currentUser.uid)
-          .get();
-
-      List<Map<String, dynamic>> loadedWorkouts = [];
-      int workoutsCount = 0;
-
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-
-        if (data['workouts'] != null && data['workouts'] is Map) {
-          final workoutsMap = data['workouts'] as Map<String, dynamic>;
-
-          for (var dateKey in workoutsMap.keys) {
-            if (dateKey.toString() == todayDate) {
-              final todayWorkouts = workoutsMap[dateKey];
-
-              if (todayWorkouts is List) {
-                workoutsCount = todayWorkouts.length;
-                for (var exercise in todayWorkouts) {
-                  if (exercise is Map<String, dynamic>) {
-                    loadedWorkouts.add(exercise);
-                  }
-                }
-              }
-              break;
-            }
-          }
-        }
-      }
+      final response = await ApiClient.getWorkoutPlanForDate(
+        userId: _userId!,
+        date: todayDate,
+      );
+      final loadedWorkouts = (response['exercises'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final workoutsCount = loadedWorkouts.length;
 
       setState(() {
         workouts = loadedWorkouts;
@@ -109,59 +92,78 @@ class _ProgressPageState extends State<ProgressPage> {
     }
   }
 
-  Future<void> _loadSessions() async {
-    try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) return;
+  void _startSessionsPolling() {
+    _sessionsPollingTimer?.cancel();
+    if ((_userId ?? '').isEmpty) return;
 
-      debugPrint('Loading sessions for user: ${currentUser.uid}, date: $todayDate');
+    _sessionsPollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      await _fetchSessions();
+    });
+  }
 
-      // Query sessions for this user and date (without orderBy to avoid index requirement)
-      final snapshot = await _firestore
-          .collection('sessions')
-          .where('userId', isEqualTo: currentUser.uid)
-          .where('date', isEqualTo: todayDate)
-          .get();
-
-      List<Map<String, dynamic>> loadedSessions = [];
-
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        loadedSessions.add({
-          'id': doc.id,
-          'sessionId': data['sessionId'] ?? doc.id,
-          'status': data['status'] ?? 'Active',
-          'createdAt': data['createdAt'],
-          'closedAt': data['closedAt'],
-          'exercises': data['exercises'] ?? [],
-        });
+  DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is String) {
+      final parsed = DateTime.tryParse(value);
+      return parsed;
+    }
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is Map<String, dynamic>) {
+      final seconds = value['_seconds'] ?? value['seconds'];
+      if (seconds is int) {
+        return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
       }
+      if (seconds is num) {
+        return DateTime.fromMillisecondsSinceEpoch((seconds * 1000).toInt());
+      }
+    }
+    return null;
+  }
 
-      // Sort by createdAt in Dart instead of Firestore
+  Future<void> _fetchSessions() async {
+    if ((_userId ?? '').isEmpty) return;
+
+    try {
+      final response = await ApiClient.getSessionsByDate(
+        userId: _userId!,
+        date: todayDate,
+      );
+
+      final loadedSessions = (response['sessions'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .map((data) => {
+                'id': data['id'],
+                'sessionId': data['sessionId'] ?? data['id'],
+                'status': data['status'] ?? 'Active',
+                'createdAt': data['createdAt'],
+                'closedAt': data['closedAt'],
+                'exercises': data['exercises'] ?? [],
+              })
+          .toList();
+
       loadedSessions.sort((a, b) {
-        final aTime = a['createdAt'] as Timestamp?;
-        final bTime = b['createdAt'] as Timestamp?;
+        final aTime = _parseDateTime(a['createdAt']);
+        final bTime = _parseDateTime(b['createdAt']);
         if (aTime == null && bTime == null) return 0;
         if (aTime == null) return 1;
         if (bTime == null) return -1;
-        return bTime.compareTo(aTime); // Descending order (newest first)
+        return bTime.compareTo(aTime);
       });
+
+      if (!mounted) return;
 
       setState(() {
         sessions = loadedSessions;
+        _closingSessionId = null;
       });
-
-      debugPrint('Total sessions loaded: ${sessions.length}');
-    } catch (e, stackTrace) {
-      debugPrint('Error loading sessions: $e');
-      debugPrint('Stack trace: $stackTrace');
+    } catch (e) {
+      debugPrint('Error fetching sessions: $e');
     }
   }
 
   Future<void> _createNewSession() async {
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) return;
+      if ((_userId ?? '').isEmpty) return;
 
       // Check if there's already an active session for today
       final activeSession = sessions.firstWhere(
@@ -181,15 +183,6 @@ class _ProgressPageState extends State<ProgressPage> {
         return;
       }
 
-      // Generate unique short session ID combining user ID prefix and timestamp
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      // Take first 6 chars of user ID + last 10 digits of timestamp for shorter ID
-      final userPrefix = currentUser.uid.length > 6
-          ? currentUser.uid.substring(0, 6)
-          : currentUser.uid;
-      final timestampSuffix = timestamp.toString().substring(timestamp.toString().length - 10);
-      final sessionId = '$userPrefix$timestampSuffix';
-
       // Copy today's workout plan and add reps/current_reps fields to each exercise
       final exercisesForSession = workouts.map((exercise) {
         return {
@@ -202,17 +195,13 @@ class _ProgressPageState extends State<ProgressPage> {
 
       debugPrint('Creating session with ${exercisesForSession.length} exercises');
 
-      // Create new session document
-      await _firestore.collection('sessions').add({
-        'userId': currentUser.uid,
-        'sessionId': sessionId,
-        'date': todayDate,
-        'status': 'Active',
-        'embedding_status': 0,
-        'global_session': null,
-        'createdAt': FieldValue.serverTimestamp(),
-        'exercises': exercisesForSession,
-      });
+      await ApiClient.createSession(
+        userId: _userId!,
+        date: todayDate,
+        exercises: exercisesForSession,
+      );
+
+      await _fetchSessions();
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -223,8 +212,6 @@ class _ProgressPageState extends State<ProgressPage> {
         );
       }
 
-      // Reload sessions
-      _loadSessions();
     } catch (e) {
       debugPrint('Error creating session: $e');
       if (mounted) {
@@ -238,69 +225,19 @@ class _ProgressPageState extends State<ProgressPage> {
     }
   }
 
-  Future<void> _closeSession(String sessionId) async {
+  Future<void> _closeSession(String docId) async {
+    if (_closingSessionId != null) return; // Prevent double-tap
+
+    setState(() => _closingSessionId = docId);
+
     try {
-      // Get the session document
-      final sessionDoc = await _firestore.collection('sessions').doc(sessionId).get();
+      await ApiClient.closeSession(sessionId: docId);
+      await _fetchSessions();
 
-      if (!sessionDoc.exists) {
-        throw Exception('Session not found');
-      }
-
-      final sessionData = sessionDoc.data();
-      final exercises = sessionData?['exercises'] as List? ?? [];
-      final sessionIdValue = sessionData?['sessionId'] as String?;
-
-      // Calculate final statistics before closing
-      if (sessionIdValue != null && exercises.isNotEmpty) {
-        final currentUser = _auth.currentUser;
-        if (currentUser != null) {
-          // Fetch all current_workout entries for this user
-          final workoutSnapshot = await _firestore
-              .collection('current_workout')
-              .where('user_id', isEqualTo: currentUser.uid)
-              .get();
-
-          // Calculate current_reps for each exercise by summing from current_workout
-          final updatedExercises = exercises.map((exercise) {
-            final exerciseName = exercise['name'];
-            int totalCurrentReps = 0;
-
-            // Sum all current_reps for this exercise in this session
-            for (var workoutDoc in workoutSnapshot.docs) {
-              final data = workoutDoc.data();
-              final workoutSessionId = data['session_id'] as String?;
-
-              if (data['exercise_name'] == exerciseName &&
-                  workoutSessionId == sessionIdValue) {
-                totalCurrentReps += (data['reps'] as int? ?? 0);
-              }
-            }
-
-            // Check if exercise is completed (current_reps >= target_reps)
-            final targetReps = exercise['reps'] ?? 0;
-            final isCompleted = totalCurrentReps >= targetReps;
-
-            return {
-              ...exercise,
-              'current_reps': totalCurrentReps,
-              'completed': isCompleted,
-            };
-          }).toList();
-
-          // Update session with final statistics
-          await _firestore.collection('sessions').doc(sessionId).update({
-            'exercises': updatedExercises,
-            'status': 'Closed',
-            'closedAt': FieldValue.serverTimestamp(),
-          });
-        }
-      } else {
-        // If no exercises or sessionId, just update status
-        await _firestore.collection('sessions').doc(sessionId).update({
-          'status': 'Closed',
-          'closedAt': FieldValue.serverTimestamp(),
-        });
+      // Stop reid monitoring if this was the active monitored session
+      final reidService = ReidMonitorService();
+      if (reidService.activeSessionDocId == docId) {
+        await reidService.stopMonitoring();
       }
 
       if (mounted) {
@@ -311,12 +248,10 @@ class _ProgressPageState extends State<ProgressPage> {
           ),
         );
       }
-
-      // Reload sessions
-      _loadSessions();
     } catch (e) {
       debugPrint('Error closing session: $e');
       if (mounted) {
+        setState(() => _closingSessionId = null);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error closing session: $e'),
@@ -608,10 +543,7 @@ class _ProgressPageState extends State<ProgressPage> {
                                           sessionDocId: session['id'],
                                         ),
                                       ),
-                                    ).then((_) {
-                                      // Refresh sessions when returning from analytics page
-                                      _loadSessions();
-                                    });
+                                    );
                                   } else {
                                     Navigator.push(
                                       context,
@@ -621,10 +553,7 @@ class _ProgressPageState extends State<ProgressPage> {
                                           sessionDocId: session['id'],
                                         ),
                                       ),
-                                    ).then((_) {
-                                      // Refresh sessions when returning (e.g., after ending session)
-                                      _loadSessions();
-                                    });
+                                    );
                                   }
                                 },
                                 style: TextButton.styleFrom(
@@ -653,31 +582,40 @@ class _ProgressPageState extends State<ProgressPage> {
 
                               // Close button only for Active
                               if (isActive)
-                                TextButton(
-                                  onPressed: () {
-                                    _closeSession(session['id']);
-                                  },
-                                  style: TextButton.styleFrom(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 12,
-                                    ),
-                                    minimumSize: const Size(0, 32),
-                                    backgroundColor:
-                                    Colors.red.withOpacity(0.1),
-                                    foregroundColor: Colors.red,
-                                    shape: RoundedRectangleBorder(
-                                      borderRadius:
-                                      BorderRadius.circular(20),
-                                    ),
-                                  ),
-                                  child: const Text(
-                                    "Close",
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.w600,
-                                    ),
-                                  ),
-                                ),
+                                _closingSessionId == session['id']
+                                    ? const SizedBox(
+                                        width: 24,
+                                        height: 24,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Colors.red,
+                                        ),
+                                      )
+                                    : TextButton(
+                                        onPressed: () {
+                                          _closeSession(session['id']);
+                                        },
+                                        style: TextButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 12,
+                                          ),
+                                          minimumSize: const Size(0, 32),
+                                          backgroundColor:
+                                          Colors.red.withOpacity(0.1),
+                                          foregroundColor: Colors.red,
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius:
+                                            BorderRadius.circular(20),
+                                          ),
+                                        ),
+                                        child: const Text(
+                                          "Close",
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ),
                             ],
                           ),
                         ],

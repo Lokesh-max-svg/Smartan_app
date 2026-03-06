@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/user_profile_service.dart';
 
@@ -11,22 +10,15 @@ class SplashPage extends StatefulWidget {
 }
 
 class _SplashPageState extends State<SplashPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
   final UserProfileService _profileService = UserProfileService();
 
   Future<void> _navigateBasedOnAuth() async {
-    // Check if user is signed in with Firebase
-    final currentUser = _auth.currentUser;
-
-    // Also check SharedPreferences as backup
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id');
+    final authToken = prefs.getString('auth_token');
 
-    if (currentUser != null || (userId != null && userId.isNotEmpty)) {
-      final uid = currentUser?.uid ?? userId!;
-
-      // Check if profile is completed
-      final isCompleted = await _profileService.isProfileCompleted(uid);
+    if ((userId ?? '').isNotEmpty && (authToken ?? '').isNotEmpty) {
+      final isCompleted = await _profileService.isProfileCompleted(userId!);
 
       if (mounted) {
         if (isCompleted) {
@@ -36,7 +28,6 @@ class _SplashPageState extends State<SplashPage> {
         }
       }
     } else {
-      // User is not signed in - navigate to login
       if (mounted) {
         Navigator.pushReplacementNamed(context, '/login');
       }
@@ -47,8 +38,8 @@ class _SplashPageState extends State<SplashPage> {
   void initState() {
     super.initState();
 
-    // Show splash for 3 seconds then check auth
-    Future.delayed(const Duration(seconds: 3), () {
+    // Show splash for 1 second then check auth
+    Future.delayed(const Duration(seconds: 1), () {
       if (mounted) {
         _navigateBasedOnAuth();
       }

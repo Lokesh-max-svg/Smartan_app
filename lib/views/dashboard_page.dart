@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 import '../services/user_profile_service.dart';
@@ -12,7 +11,6 @@ class DashboardPage extends StatefulWidget {
 }
 
 class _DashboardPageState extends State<DashboardPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
   final AuthService _authService = AuthService();
   final UserProfileService _profileService = UserProfileService();
   String username = '';
@@ -26,11 +24,11 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> _checkProfileAndLoadData() async {
-    final currentUser = _auth.currentUser;
-
-    if (currentUser != null) {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isNotEmpty) {
       // Check if profile is completed
-      final isCompleted = await _profileService.isProfileCompleted(currentUser.uid);
+      final isCompleted = await _profileService.isProfileCompleted(userId!);
 
       if (!isCompleted) {
         // Profile not completed, redirect to user info page
@@ -50,12 +48,11 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> _loadUserData() async {
-    final currentUser = _auth.currentUser;
     final prefs = await SharedPreferences.getInstance();
 
     setState(() {
-      username = currentUser?.displayName ?? prefs.getString('username') ?? 'User';
-      email = currentUser?.email ?? prefs.getString('user_email') ?? '';
+      username = prefs.getString('username') ?? 'User';
+      email = prefs.getString('user_email') ?? '';
     });
   }
 

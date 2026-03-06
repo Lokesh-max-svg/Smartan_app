@@ -1,4 +1,7 @@
-import {onSchedule} from "firebase-functions/v2/scheduler";
+import {onCall} from "firebase-functions/v2/https";
+import {onDocumentCreated} from "firebase-functions/v2/firestore";
+import {onTaskDispatched} from "firebase-functions/v2/tasks";
+import {getFunctions} from "firebase-admin/functions";
 import * as admin from "firebase-admin";
 
 admin.initializeApp();
@@ -47,33 +50,80 @@ interface GcsFolderInfo {
 }
 
 /**
- * Function to get GCS folders for a session from current_workout collection
- * @param {string} sessionId - The session ID
- * @return {Promise<Map>} Map of exercise name to GcsFolderInfo array
+ * Firestore trigger: when a new current_workout entry is created,
+ * update the corresponding session with current_reps, completion
+ * status, and GCS folder data. Also auto-closes sessions > 3 hours.
+ *
+ * Replaces the old updateExerciseCompletion scheduled function.
+ * Only runs when actual workout data is written — zero cost when idle.
  */
-async function getGcsFoldersForSession(
-  sessionId: string
-): Promise<Map<string, GcsFolderInfo[]>> {
-  const db = admin.firestore();
+export const onWorkoutCreated = onDocumentCreated(
+  "current_workout/{docId}",
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
 
-  try {
-    // Query current_workout collection for this session's data
-    const snapshot = await db.collection("current_workout")
+    const sessionId = data.session_id;
+    if (!sessionId) return;
+
+    const db = admin.firestore();
+
+    // Find the active session with this sessionId
+    const sessionSnapshot = await db.collection("sessions")
+      .where("sessionId", "==", sessionId)
+      .where("status", "in", ["Active", "active"])
+      .limit(1)
+      .get();
+
+    if (sessionSnapshot.empty) return;
+
+    const sessionDoc = sessionSnapshot.docs[0];
+    const sessionData = sessionDoc.data();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const exercises = sessionData.exercises as Array<any> || [];
+
+    if (exercises.length === 0) return;
+
+    // Check if session should be auto-closed (3+ hours old)
+    const createdAt = sessionData.createdAt?.toDate();
+    if (createdAt) {
+      const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+      if (createdAt <= threeHoursAgo) {
+        await sessionDoc.ref.update({
+          status: "Closed",
+          endedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`Auto-closed session ${sessionDoc.id} (3+ hours old)`);
+        return;
+      }
+    }
+
+    // Get ALL current_workout entries for this session (single query)
+    const workoutSnapshot = await db.collection("current_workout")
       .where("session_id", "==", sessionId)
       .get();
 
-    // Group folders by exercise name
-    const exerciseFolders = new Map<string, GcsFolderInfo[]>();
+    // Sum reps and collect GCS folders in a single pass
+    const repsByExercise = new Map<string, number>();
+    const gcsFoldersByExercise = new Map<string, GcsFolderInfo[]>();
 
-    snapshot.docs.forEach((doc) => {
-      const data = doc.data();
-      const exerciseName = data.exercise_name || "";
-      const smplBinFiles = data.smpl_bin_files || {};
+    workoutSnapshot.docs.forEach((doc) => {
+      const d = doc.data();
+      const exerciseName = d.exercise_name || "";
+      const reps = d.reps || 0;
+
+      // Sum reps
+      repsByExercise.set(
+        exerciseName,
+        (repsByExercise.get(exerciseName) || 0) + reps
+      );
+
+      // Collect GCS folders
+      const smplBinFiles = d.smpl_bin_files || {};
       const gcsFolder = smplBinFiles.gcs_folder || "";
       const fileCount = smplBinFiles.file_count || 0;
 
       if (exerciseName && gcsFolder) {
-        // Parse folder name to extract camera, batch, timestamp
         const folderName = gcsFolder.split("/").pop() || "";
         const parsed = parseGcsFolderName(folderName);
 
@@ -86,222 +136,186 @@ async function getGcsFoldersForSession(
             frames: fileCount || 192,
           };
 
-          const existing = exerciseFolders.get(exerciseName) || [];
+          const existing = gcsFoldersByExercise.get(exerciseName) || [];
           existing.push(folderInfo);
-          exerciseFolders.set(exerciseName, existing);
+          gcsFoldersByExercise.set(exerciseName, existing);
         }
       }
     });
 
-    // Sort each exercise's folders by batch number first, then timestamp
-    exerciseFolders.forEach((folders, exerciseName) => {
-      folders.sort((a, b) => {
-        // Primary sort by batch number
-        if (a.batch !== b.batch) {
-          return a.batch - b.batch;
-        }
-        // Secondary sort by timestamp
-        return a.timestamp - b.timestamp;
-      });
-      exerciseFolders.set(exerciseName, folders);
+    // Sort GCS folders by batch then timestamp
+    gcsFoldersByExercise.forEach((folders, name) => {
+      folders.sort((a, b) =>
+        a.batch !== b.batch ? a.batch - b.batch : a.timestamp - b.timestamp
+      );
+      gcsFoldersByExercise.set(name, folders);
     });
 
-    return exerciseFolders;
-  } catch (error) {
-    console.error(`Error getting GCS folders for session ${sessionId}:`, error);
-    return new Map();
-  }
-}
+    // Update exercises with current reps, completion, and GCS folders
+    let hasUpdates = false;
+    const updatedExercises = exercises.map((exercise) => {
+      const exerciseName = exercise.name || "";
+      const normalizedName = normalizeExerciseName(exerciseName);
+      const currentReps = repsByExercise.get(exerciseName) ||
+        repsByExercise.get(normalizedName) || 0;
+      const prevCurrentReps = exercise.current_reps || 0;
+      const targetReps = exercise.reps || 0;
+      const isCompleted = exercise.completed || false;
 
-// Runs every 10 minutes - auto-closes Active sessions after 3 hours
-export const updateCompletedStatus = onSchedule({
-  schedule: "*/10 * * * *", // Cron syntax: every 10 minutes
-  timeZone: "America/New_York", // Set your timezone
-}, async () => {
+      // GCS folder matching (try raw name then normalized)
+      const folders = gcsFoldersByExercise.get(exerciseName) ||
+        gcsFoldersByExercise.get(normalizedName) || [];
+      const existingFolders = exercise.gcs_folders || [];
+
+      const newFolderPaths = new Set(folders.map((f) => f.path));
+      const existingPaths = new Set(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        existingFolders.map((f: any) => f.path)
+      );
+      const hasNewFolders = folders.length > 0 && (
+        folders.length !== existingFolders.length ||
+        [...newFolderPaths].some((p) => !existingPaths.has(p))
+      );
+
+      const shouldComplete = !isCompleted &&
+        currentReps >= targetReps &&
+        targetReps > 0;
+      const repsChanged = currentReps !== prevCurrentReps;
+
+      if (shouldComplete || hasNewFolders || repsChanged) {
+        hasUpdates = true;
+        return {
+          ...exercise,
+          current_reps: currentReps,
+          completed: shouldComplete ? true : isCompleted,
+          gcs_folders: folders.length > 0 ? folders : existingFolders,
+        };
+      }
+
+      return exercise;
+    });
+
+    if (hasUpdates) {
+      await sessionDoc.ref.update({exercises: updatedExercises});
+      console.log(`Updated session ${sessionDoc.id} via workout trigger`);
+    }
+  }
+);
+
+/**
+ * Task queue function: auto-closes a session if still Active.
+ * Dispatched by onSessionCreated with a 3-hour delay.
+ */
+export const autoCloseSession = onTaskDispatched({
+  retryConfig: {
+    maxAttempts: 3,
+    minBackoffSeconds: 30,
+  },
+  rateLimits: {
+    maxConcurrentDispatches: 10,
+  },
+}, async (req) => {
+  const {sessionDocId} = req.data as {sessionDocId: string};
+  if (!sessionDocId) return;
+
   const db = admin.firestore();
-  const threeHoursAgo = admin.firestore.Timestamp.fromDate(
-    new Date(Date.now() - 3 * 60 * 60 * 1000)
-  );
+  const sessionRef = db.collection("sessions").doc(sessionDocId);
+  const sessionDoc = await sessionRef.get();
 
-  try {
-    // Query sessions where createdAt < 3 hours ago
-    // Note: Filtering status in code to avoid composite index requirement
-    const snapshot = await db.collection("sessions")
-      .where("createdAt", "<=", threeHoursAgo)
-      .get();
+  if (!sessionDoc.exists) return;
 
-    if (snapshot.empty) {
-      console.log("No documents to update");
-      return;
-    }
-
-    // Filter in code and batch update
-    const batch = db.batch();
-    let updateCount = 0;
-
-    snapshot.docs.forEach((doc) => {
-      const data = doc.data();
-      const status = data.status;
-
-      // Only update Active sessions to Closed (leave Closed sessions as is)
-      if (status === "Active") {
-        batch.update(doc.ref, {
-          status: "Closed",
-          endedAt: admin.firestore.FieldValue.serverTimestamp(),
-        });
-        updateCount++;
-      }
-    });
-
-    if (updateCount === 0) {
-      console.log("No documents need updating");
-      return;
-    }
-
-    await batch.commit();
-    console.log(`Updated ${updateCount} sessions to Closed`);
-
+  const data = sessionDoc.data();
+  if (data?.status !== "Active") {
+    console.log(`Session ${sessionDocId} already ${data?.status}, skipping`);
     return;
-  } catch (error) {
-    console.error("Error updating documents:", error);
-    throw error;
   }
+
+  await sessionRef.update({
+    status: "Closed",
+    endedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  console.log(`Auto-closed session ${sessionDocId} via scheduled task`);
 });
 
-// Runs every 5 minutes
-// Checks and updates exercise completion status based on current_reps vs reps
-// Also aggregates GCS folder data for each exercise
-export const updateExerciseCompletion = onSchedule({
-  schedule: "*/2 * * * *", // Every 2 minutes (reduced from 1 min to save costs)
-  timeZone: "America/New_York",
-}, async () => {
-  const db = admin.firestore();
+/**
+ * Firestore trigger: when a new session is created, enqueue a task
+ * to auto-close it 3 hours later.
+ */
+export const onSessionCreated = onDocumentCreated(
+  "sessions/{docId}",
+  async (event) => {
+    const data = event.data?.data();
+    if (!data) return;
 
-  try {
-    // Only query Active sessions (Closed sessions don't need frequent updates)
-    // This significantly reduces Firestore reads
-    const snapshot = await db.collection("sessions")
-      .where("status", "in", ["Active", "active"])
-      .get();
+    // Only schedule auto-close for Active sessions
+    if (data.status !== "Active") return;
 
-    console.log(`Found ${snapshot.size} sessions to check`);
-
-    if (snapshot.empty) {
-      console.log("No sessions to check");
-      return;
-    }
-
-    // Process each session (need to use for...of for async operations)
-    let sessionUpdateCount = 0;
-    let exerciseUpdateCount = 0;
-    let gcsFolderUpdateCount = 0;
-
-    for (const doc of snapshot.docs) {
-      const data = doc.data();
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const exercises = data.exercises as Array<any> || [];
-      const userId = data.userId || "";
-      const sessionId = data.sessionId || "";
-
-      // Skip sessions with no exercises
-      if (exercises.length === 0) {
-        continue;
-      }
-
-      // Check if all exercises are already completed with GCS folders
-      // If so, skip the expensive nested query
-      const allCompleted = exercises.every((ex) =>
-        ex.completed === true && (ex.gcs_folders?.length > 0 || ex.reps === 0)
-      );
-      if (allCompleted) {
-        console.log(`Session ${doc.id}: All exercises complete, skipping`);
-        continue;
-      }
-
-      console.log(
-        `Session ${doc.id}: ${exercises.length} exercises, ` +
-        `status: ${data.status}`
-      );
-
-      // Check if any exercise needs GCS folder data
-      const needsGcsFolders = exercises.some((ex) =>
-        !ex.gcs_folders || ex.gcs_folders.length === 0
-      );
-
-      // Only query current_workout if exercises need GCS folder data
-      // This avoids expensive reads when folders are already populated
-      let gcsFolders = new Map<string, GcsFolderInfo[]>();
-      if (needsGcsFolders && userId && sessionId) {
-        gcsFolders = await getGcsFoldersForSession(sessionId);
-      }
-
-      let hasUpdates = false;
-      const updatedExercises = exercises.map((exercise) => {
-        const currentReps = exercise.current_reps || 0;
-        const targetReps = exercise.reps || 0;
-        const isCompleted = exercise.completed || false;
-        const exerciseName = exercise.name || "";
-
-        // Normalize exercise name for matching with GCS folder names
-        const normalizedName = normalizeExerciseName(exerciseName);
-
-        // Check if there are new GCS folders for this exercise
-        const folders = gcsFolders.get(normalizedName) || [];
-        const existingFolders = exercise.gcs_folders || [];
-
-        // Only update if we have new folders
-        const newFolderPaths = new Set(folders.map((f) => f.path));
-        const existingPaths = new Set(
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          existingFolders.map((f: any) => f.path)
-        );
-        const hasNewFolders = folders.length > 0 && (
-          folders.length !== existingFolders.length ||
-          [...newFolderPaths].some((p) => !existingPaths.has(p))
-        );
-
-        // Check if exercise should be marked as completed
-        const shouldComplete = !isCompleted &&
-          currentReps >= targetReps &&
-          targetReps > 0;
-
-        if (shouldComplete || hasNewFolders) {
-          if (shouldComplete) exerciseUpdateCount++;
-          if (hasNewFolders) gcsFolderUpdateCount++;
-          hasUpdates = true;
-          return {
-            ...exercise,
-            completed: shouldComplete ? true : isCompleted,
-            gcs_folders: folders.length > 0 ? folders : existingFolders,
-          };
-        }
-
-        return exercise;
-      });
-
-      // Update session if any exercises were updated
-      if (hasUpdates) {
-        await db.collection("sessions").doc(doc.id).update({
-          exercises: updatedExercises,
-        });
-        sessionUpdateCount++;
-      }
-    }
-
-    if (sessionUpdateCount === 0) {
-      console.log("No exercises need updates");
-      return;
-    }
-
-    console.log(
-      `Updated ${exerciseUpdateCount} exercise completions, ` +
-      `${gcsFolderUpdateCount} GCS folder updates ` +
-      `in ${sessionUpdateCount} sessions`
+    const projectId = process.env.GCLOUD_PROJECT ||
+      process.env.GCP_PROJECT || "";
+    const location = "us-central1";
+    const queue = getFunctions().taskQueue(
+      `locations/${location}/functions/autoCloseSession`
     );
 
-    return;
-  } catch (error) {
-    console.error("Error updating exercise completion:", error);
-    throw error;
+    await queue.enqueue(
+      {sessionDocId: event.params.docId},
+      {
+        scheduleDelaySeconds: 3 * 60 * 60, // 3 hours
+        uri: `https://${location}-${projectId}.cloudfunctions.net/autoCloseSession`,
+      }
+    );
+
+    console.log(
+      `Scheduled auto-close for session ${event.params.docId} in 3 hours`
+    );
   }
+);
+
+/**
+ * Callable function to resolve user display names from Firebase Auth.
+ * Accepts a list of userIds, returns a map of
+ * userId -> {name, email, photoUrl}.
+ * Also syncs resolved names back to Firestore users collection.
+ */
+export const getUserNames = onCall({
+  timeoutSeconds: 30,
+}, async (request) => {
+  const userIds = request.data.userIds as string[] | undefined;
+  if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+    return {users: {}};
+  }
+
+  // Limit to 50 users per call
+  const ids = userIds.slice(0, 50);
+  const auth = admin.auth();
+  const db = admin.firestore();
+  const results: Record<string, {
+    name: string; email: string; photoUrl: string
+  }> = {};
+
+  for (const uid of ids) {
+    try {
+      const authUser = await auth.getUser(uid);
+      const name = authUser.displayName ||
+        (authUser.email ? authUser.email.split("@")[0] : "");
+      const email = authUser.email || "";
+      const photoUrl = authUser.photoURL || "";
+
+      if (name) {
+        results[uid] = {name, email, photoUrl};
+
+        // Sync back to Firestore so future lookups don't need this call
+        await db.collection("users").doc(uid).set({
+          displayName: name,
+          email: email || undefined,
+          photoURL: photoUrl || undefined,
+          lastSyncedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, {merge: true});
+      }
+    } catch (e) {
+      console.log(`Could not resolve user ${uid}: ${e}`);
+    }
+  }
+
+  return {users: results};
 });

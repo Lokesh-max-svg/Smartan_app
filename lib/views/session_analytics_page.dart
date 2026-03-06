@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import '../services/api_client.dart';
 import 'exercise_playback_page.dart';
 
 class SessionAnalyticsPage extends StatefulWidget {
@@ -18,7 +18,6 @@ class SessionAnalyticsPage extends StatefulWidget {
 }
 
 class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   Map<String, dynamic>? sessionData;
   bool isLoading = true;
 
@@ -30,17 +29,81 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
 
   Future<void> _loadSessionData() async {
     try {
-      final doc = await _firestore
-          .collection('sessions')
-          .doc(widget.sessionDocId)
-          .get();
+      final sessionResponse = await ApiClient.getSession(widget.sessionDocId);
+      final docData = sessionResponse['session'] as Map<String, dynamic>?;
 
-      if (doc.exists) {
+      if (docData != null) {
+        final data = Map<String, dynamic>.from(docData);
+
+        // Fetch current_workout docs to compute accurate reps
+        final exercises = data['exercises'] as List? ?? [];
+        if (exercises.isNotEmpty) {
+          final workoutResponse = await ApiClient.getSessionWorkoutsBySessionId(
+            widget.sessionId,
+          );
+          final workoutDocs = (workoutResponse['workouts'] as List<dynamic>? ?? [])
+              .whereType<Map<String, dynamic>>()
+              .toList();
+
+          if (workoutDocs.isNotEmpty) {
+            final updatedExercises = exercises.map((exercise) {
+              final exerciseName = exercise['name'] as String? ?? '';
+              final normalizedName = exerciseName.trim().toLowerCase().replaceAll('_', ' ');
+              int totalCurrentReps = 0;
+              List<dynamic> allGcsFolders = List.from(
+                exercise['gcs_folders'] as List? ?? [],
+              );
+
+              for (var wData in workoutDocs) {
+                final wName = (wData['exercise_name'] as String? ?? '').trim().toLowerCase().replaceAll('_', ' ');
+                if (wName == normalizedName ||
+                    wName.contains(normalizedName) ||
+                    normalizedName.contains(wName)) {
+                  totalCurrentReps += (wData['reps'] as int? ?? 0);
+                  // Merge gcs_folders from current_workout docs
+                  final folders = wData['gcs_folders'] as List?;
+                  if (folders != null) {
+                    for (var folder in folders) {
+                      if (!allGcsFolders.contains(folder)) {
+                        allGcsFolders.add(folder);
+                      }
+                    }
+                  }
+                  // Also check smpl_bin_files for gcs_folder
+                  final smplBin = wData['smpl_bin_files'] as Map<String, dynamic>?;
+                  final gcsFolder = smplBin?['gcs_folder'] as String?;
+                  if (gcsFolder != null && gcsFolder.isNotEmpty) {
+                    // Check if this path already exists in allGcsFolders
+                    final alreadyExists = allGcsFolders.any((f) =>
+                        f is Map && (f['path'] == gcsFolder || f['gcs_folder'] == gcsFolder));
+                    if (!alreadyExists) {
+                      allGcsFolders.add({'path': gcsFolder});
+                    }
+                  }
+                }
+              }
+
+              // Use the larger value between stored and computed
+              final storedReps = exercise['current_reps'] as int? ?? 0;
+              final actualReps = totalCurrentReps > storedReps
+                  ? totalCurrentReps
+                  : storedReps;
+              final targetReps = exercise['reps'] ?? 0;
+
+              return {
+                ...Map<String, dynamic>.from(exercise),
+                'current_reps': actualReps,
+                'completed': actualReps >= targetReps && targetReps > 0,
+                if (allGcsFolders.isNotEmpty) 'gcs_folders': allGcsFolders,
+              };
+            }).toList();
+
+            data['exercises'] = updatedExercises;
+          }
+        }
+
         setState(() {
-          sessionData = {
-            'id': doc.id,
-            ...doc.data()!,
-          };
+          sessionData = data;
           isLoading = false;
         });
       } else {
@@ -54,6 +117,22 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
         isLoading = false;
       });
     }
+  }
+
+  DateTime? _parseDateTime(dynamic value) {
+    if (value == null) return null;
+    if (value is String) return DateTime.tryParse(value);
+    if (value is int) return DateTime.fromMillisecondsSinceEpoch(value);
+    if (value is Map<String, dynamic>) {
+      final seconds = value['_seconds'] ?? value['seconds'];
+      if (seconds is int) {
+        return DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+      }
+      if (seconds is num) {
+        return DateTime.fromMillisecondsSinceEpoch((seconds * 1000).toInt());
+      }
+    }
+    return null;
   }
 
   @override
@@ -93,14 +172,14 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
     final totalExercises = exercises.length;
     final completionRate = totalExercises > 0 ? (completedExercises / totalExercises * 100) : 0;
 
-    final createdAt = sessionData!['createdAt'] as Timestamp?;
-    final endedAt = sessionData!['endedAt'] as Timestamp?;
-    final closedAt = sessionData!['closedAt'] as Timestamp?;
+    final createdAt = _parseDateTime(sessionData!['createdAt']);
+    final endedAt = _parseDateTime(sessionData!['endedAt']);
+    final closedAt = _parseDateTime(sessionData!['closedAt']);
 
     String? duration;
     if (createdAt != null && (endedAt != null || closedAt != null)) {
       final end = endedAt ?? closedAt;
-      final diff = end!.toDate().difference(createdAt.toDate());
+      final diff = end!.difference(createdAt);
       final hours = diff.inHours;
       final minutes = diff.inMinutes % 60;
       duration = hours > 0 ? '${hours}h ${minutes}m' : '${minutes}m';
@@ -250,7 +329,7 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                 if (createdAt != null)
                   _buildDetailCard(
                     'Started At',
-                    DateFormat('MMM dd, yyyy - hh:mm a').format(createdAt.toDate()),
+                    DateFormat('MMM dd, yyyy - hh:mm a').format(createdAt),
                     Icons.play_circle,
                   ),
                 const SizedBox(height: 12),
@@ -258,7 +337,7 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                 if (endedAt != null || closedAt != null)
                   _buildDetailCard(
                     'Ended At',
-                    DateFormat('MMM dd, yyyy - hh:mm a').format((endedAt ?? closedAt)!.toDate()),
+                    DateFormat('MMM dd, yyyy - hh:mm a').format(endedAt ?? closedAt!),
                     Icons.stop_circle,
                   ),
                 const SizedBox(height: 12),
@@ -308,8 +387,10 @@ class _SessionAnalyticsPageState extends State<SessionAnalyticsPage> {
                     itemBuilder: (context, index) {
                       final exercise = exercises[index];
                       final isCompleted = exercise['completed'] == true;
-                      final hasGcsFolders = exercise['gcs_folders'] != null &&
-                          (exercise['gcs_folders'] as List).isNotEmpty;
+                      final currentReps = exercise['current_reps'] as int? ?? 0;
+                      final hasGcsFolders = (exercise['gcs_folders'] != null &&
+                          (exercise['gcs_folders'] as List).isNotEmpty) ||
+                          currentReps > 0;
 
                       return GestureDetector(
                         onTap: () {

@@ -6,6 +6,12 @@ class SignupController extends ChangeNotifier {
 
   bool isLoading = false;
 
+  /// Sign up via Node.js backend middleware
+  /// - Validates form input
+  /// - Calls backend API at http://localhost:3000/api/auth/signup-email
+  /// - Saves user data locally on success
+  /// - Navigates to '/user-info' on success
+  /// - Shows error SnackBar on failure
   Future<void> signUp({
     required BuildContext context,
     required GlobalKey<FormState> formKey,
@@ -19,13 +25,15 @@ class SignupController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      await _authService.signUpWithEmailPassword(
+      // Call backend signup endpoint
+      await _authService.signUpViaBackend(
         email: email,
         password: password,
         username: username,
       );
 
       if (context.mounted) {
+        // Show success message
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Registration successful! Please complete your profile.'),
@@ -34,18 +42,22 @@ class SignupController extends ChangeNotifier {
           ),
         );
 
+        // Brief delay to show snackbar
         await Future.delayed(const Duration(seconds: 1));
 
         if (context.mounted) {
+          // Navigate to user info page to complete profile
           Navigator.pushReplacementNamed(context, '/user-info');
         }
       }
     } catch (e) {
+      // Display error message
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(e.toString()),
+            content: Text(_formatErrorMessage(e.toString())),
             backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
           ),
         );
       }
@@ -63,12 +75,15 @@ class SignupController extends ChangeNotifier {
       final userCredential = await _authService.signInWithGoogle();
 
       if (userCredential != null) {
-        await _authService.saveGoogleUser(userCredential.user!);
+        final sessionData = await _authService.saveGoogleUser(userCredential.user!);
+        final displayName =
+            (sessionData['displayName'] ?? userCredential.user?.displayName ?? 'User')
+                .toString();
 
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text("Signed up as ${userCredential.user?.displayName}. Please complete your profile."),
+              content: Text('Signed up as $displayName. Please complete your profile.'),
               backgroundColor: Colors.green,
             ),
           );
@@ -94,7 +109,7 @@ class SignupController extends ChangeNotifier {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text("Error: $e"),
+            content: Text("Error: ${_formatErrorMessage(e.toString())}"),
             backgroundColor: Colors.red,
           ),
         );
@@ -103,5 +118,15 @@ class SignupController extends ChangeNotifier {
       isLoading = false;
       notifyListeners();
     }
+  }
+
+  /// Format error messages for display
+  /// Removes stack trace and improves readability
+  String _formatErrorMessage(String error) {
+    // Extract the meaningful part of the error
+    if (error.contains(':')) {
+      return error.split(':').last.trim();
+    }
+    return error;
   }
 }

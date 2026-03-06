@@ -3,11 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
-import 'package:firebase_storage/firebase_storage.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:archive/archive.dart';
 import 'package:path_provider/path_provider.dart';
 import 'dart:math' as math;
+import '../services/api_client.dart';
 
 class ExercisePlaybackPage extends StatefulWidget {
   final Map<String, dynamic> exercise;
@@ -24,8 +23,6 @@ class ExercisePlaybackPage extends StatefulWidget {
 }
 
 class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
-  final FirebaseStorage _storage = FirebaseStorage.instance;
-
   List<Map<String, dynamic>> _gcsFolders = [];
 
   // All parsed frames stored in memory for smooth playback
@@ -276,126 +273,19 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
     var folders = widget.exercise['gcs_folders'] as List<dynamic>? ?? [];
     debugPrint('Initial gcs_folders from widget: ${folders.length}');
 
-    // If no gcs_folders in exercise data, fetch from Firestore sessions collection
-    String? userId;
     if (folders.isEmpty) {
       setState(() {
         _loadingStatus = 'Fetching recording data...';
       });
 
       try {
-        debugPrint('Fetching session with sessionId: ${widget.sessionId}');
-
-        // First try to get by document ID
-        var sessionDoc = await FirebaseFirestore.instance
-            .collection('sessions')
-            .doc(widget.sessionId)
-            .get();
-
-        // If not found by doc ID, query by sessionId field
-        if (!sessionDoc.exists) {
-          debugPrint('Not found by doc ID, querying by sessionId field...');
-          final querySnapshot = await FirebaseFirestore.instance
-              .collection('sessions')
-              .where('sessionId', isEqualTo: widget.sessionId)
-              .limit(1)
-              .get();
-
-          if (querySnapshot.docs.isNotEmpty) {
-            sessionDoc = querySnapshot.docs.first;
-            debugPrint('Found session by sessionId field: ${sessionDoc.id}');
-          }
-        }
-
-        debugPrint('Session doc exists: ${sessionDoc.exists}');
-        if (sessionDoc.exists) {
-          final sessionData = sessionDoc.data();
-          userId = sessionData?['userId'] as String?;
-          debugPrint('UserId from session: $userId');
-          debugPrint('Session data keys: ${sessionData?.keys.toList()}');
-
-          final exercises = sessionData?['exercises'] as List<dynamic>? ?? [];
-          final exerciseName = widget.exercise['name'] as String? ?? '';
-          final normalizedExerciseName = exerciseName.toLowerCase().replaceAll(' ', '_');
-          debugPrint('Looking for exercise: $exerciseName (normalized: $normalizedExerciseName) in ${exercises.length} exercises');
-
-          // Find matching exercise by name
-          for (final ex in exercises) {
-            final exMap = ex as Map<String, dynamic>;
-            final exName = exMap['name'] as String? ?? '';
-            final normalizedExName = exName.toLowerCase().replaceAll(' ', '_');
-            debugPrint('  Checking: $exName (normalized: $normalizedExName) - gcs_folders: ${(exMap['gcs_folders'] as List?)?.length ?? 0}');
-
-            // Match by exact name or normalized name
-            if (exName == exerciseName || normalizedExName == normalizedExerciseName) {
-              folders = exMap['gcs_folders'] as List<dynamic>? ?? [];
-              debugPrint('Fetched ${folders.length} gcs_folders from Firestore for $exerciseName');
-              break;
-            }
-          }
-
-          // If still no folders, check if gcs_folders exist at session level (legacy format)
-          if (folders.isEmpty) {
-            final sessionGcsFolders = sessionData?['gcs_folders'] as List<dynamic>? ?? [];
-            if (sessionGcsFolders.isNotEmpty) {
-              debugPrint('Found ${sessionGcsFolders.length} gcs_folders at session level');
-              // Filter by exercise name
-              final filteredFolders = <dynamic>[];
-              for (final folder in sessionGcsFolders) {
-                final folderMap = folder as Map<String, dynamic>;
-                final path = folderMap['path'] as String? ?? '';
-                if (path.contains(normalizedExerciseName)) {
-                  filteredFolders.add(folder);
-                }
-              }
-              folders = filteredFolders;
-              debugPrint('Filtered to ${folders.length} folders for $exerciseName');
-            }
-          }
-        }
+        final response = await ApiClient.getPlaybackData(
+          sessionId: widget.sessionId,
+          exerciseName: (widget.exercise['name'] ?? '').toString(),
+        );
+        folders = (response['folders'] as List<dynamic>? ?? []);
       } catch (e) {
-        debugPrint('Error fetching gcs_folders from Firestore: $e');
-      }
-    }
-
-    // Fallback: scan Storage directly if no gcs_folders found
-    debugPrint('After Firestore fetch - folders: ${folders.length}, userId: $userId');
-    if (folders.isEmpty && userId != null) {
-      setState(() {
-        _loadingStatus = 'Scanning storage for recordings...';
-      });
-
-      try {
-        final exerciseName = (widget.exercise['name'] as String? ?? '').toLowerCase().replaceAll(' ', '_');
-        final storagePath = 'pose_data/$userId/${widget.sessionId}';
-        debugPrint('Scanning storage: $storagePath for exercise: $exerciseName');
-
-        final storageRef = _storage.ref(storagePath);
-        final listResult = await storageRef.listAll();
-
-        // Filter folders matching this exercise name
-        final matchingFolders = <Map<String, dynamic>>[];
-        for (final prefix in listResult.prefixes) {
-          final folderName = prefix.name;
-          // Pattern: exerciseName_cam_X_X_timestamp (e.g., front_raise_cam_1_6_1770706423)
-          if (folderName.startsWith(exerciseName)) {
-            final parsed = _parseGcsFolderName(folderName);
-            if (parsed != null) {
-              matchingFolders.add({
-                'path': '$storagePath/$folderName',
-                'camera': parsed['camera'],
-                'batch': parsed['batch'],
-                'timestamp': parsed['timestamp'],
-              });
-              debugPrint('Found folder: $folderName -> batch ${parsed['batch']}');
-            }
-          }
-        }
-
-        folders = matchingFolders;
-        debugPrint('Found ${folders.length} folders from Storage scan');
-      } catch (e) {
-        debugPrint('Error scanning storage: $e');
+        debugPrint('Error fetching playback folders from backend: $e');
       }
     }
 
@@ -473,14 +363,8 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
 
         debugPrint('Downloading ZIP: $path');
 
-        // Download the ZIP file (single request!)
-        final ref = _storage.ref(path);
-        final zipData = await ref.getData(50 * 1024 * 1024); // 50MB max
-
-        if (zipData == null) {
-          debugPrint('Failed to download ZIP: $path');
-          continue;
-        }
+        // Download the ZIP file (single request) through backend proxy
+        final zipData = await ApiClient.downloadStorageFile(path: path);
 
         debugPrint('ZIP downloaded: ${zipData.length} bytes');
 
@@ -550,21 +434,6 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
     }
   }
 
-  /// Parse GCS folder name to extract camera, batch, timestamp
-  /// Format: {exercise_name}_cam_{camera}_{batch}_{timestamp}
-  /// e.g., "front_raise_cam_1_6_1770706423"
-  Map<String, int>? _parseGcsFolderName(String folderName) {
-    // Match pattern: anything_cam_X_X_timestamp
-    final match = RegExp(r'_cam_(\d+)_(\d+)_(\d+)$').firstMatch(folderName);
-    if (match == null) return null;
-
-    return {
-      'camera': int.tryParse(match.group(1) ?? '0') ?? 0,
-      'batch': int.tryParse(match.group(2) ?? '0') ?? 0,
-      'timestamp': int.tryParse(match.group(3) ?? '0') ?? 0,
-    };
-  }
-
   /// Extract frame number from filename like "cam_1_track6_entry3_front_raise_5.0_frame0033.bin"
   int _extractFrameNumber(String filename) {
     final match = RegExp(r'frame(\d+)\.bin$').firstMatch(filename);
@@ -602,15 +471,22 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         final path = folder['path'] as String;
         final batch = folder['batch'] as int? ?? 0;
 
-        final ref = _storage.ref(path);
-        final result = await ref.listAll();
-
-        final binFiles = result.items.where((f) => f.name.endsWith('.bin')).toList();
-        binFiles.sort((a, b) => a.name.compareTo(b.name));
+        final response = await ApiClient.listStorageFiles(path: path);
+        final items = (response['items'] as List<dynamic>? ?? [])
+            .whereType<Map<String, dynamic>>()
+            .toList();
+        final binFiles = items
+            .where((item) => (item['name'] ?? '').toString().endsWith('.bin'))
+            .toList()
+          ..sort(
+            (a, b) => (a['name'] ?? '').toString().compareTo(
+                  (b['name'] ?? '').toString(),
+                ),
+          );
 
         for (final file in binFiles) {
           allFilesToDownload.add(_FileToDownload(
-            ref: file,
+            path: (file['path'] ?? '').toString(),
             recordingIndex: i,
             globalIndex: allFilesToDownload.length,
           ));
@@ -639,19 +515,17 @@ class _ExercisePlaybackPageState extends State<ExercisePlaybackPage> {
         // Download batch in parallel
         final futures = batch.map((file) async {
           try {
-            final data = await file.ref.getData(10 * 1024 * 1024);
-            if (data != null) {
-              final decompressed = _decompressData(data);
-              final vertices = _parseVertices(decompressed);
-              return _DownloadResult(
-                globalIndex: file.globalIndex,
-                recordingIndex: file.recordingIndex,
-                decompressed: decompressed,
-                vertices: vertices,
-              );
-            }
+            final data = await ApiClient.downloadStorageFile(path: file.path);
+            final decompressed = _decompressData(data);
+            final vertices = _parseVertices(decompressed);
+            return _DownloadResult(
+              globalIndex: file.globalIndex,
+              recordingIndex: file.recordingIndex,
+              decompressed: decompressed,
+              vertices: vertices,
+            );
           } catch (e) {
-            debugPrint('Error downloading ${file.ref.name}: $e');
+            debugPrint('Error downloading ${file.path}: $e');
           }
           return null;
         }).toList();
@@ -1461,12 +1335,12 @@ class _ParsedFrame {
 }
 
 class _FileToDownload {
-  final Reference ref;
+  final String path;
   final int recordingIndex;
   final int globalIndex;
 
   _FileToDownload({
-    required this.ref,
+    required this.path,
     required this.recordingIndex,
     required this.globalIndex,
   });

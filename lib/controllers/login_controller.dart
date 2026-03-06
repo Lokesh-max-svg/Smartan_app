@@ -20,52 +20,35 @@ class LoginController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final userCredential = await _authService.login(email, password);
-      final userId = userCredential.user!.uid;
+      final response = await _authService.loginViaBackend(
+        email: email,
+        password: password,
+      );
 
-      // Check user status
-      final status = await _profileService.getUserStatus(userId);
+      final userId = (response['uid'] ?? '').toString();
+      final username =
+          (response['username'] ?? response['displayName'] ?? email).toString();
 
       if (context.mounted) {
-        // Validate user status
-        if (status == -1) {
-          // User is blocked
-          await _authService.signOut();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Your account has been blocked. Please contact support.'),
-              backgroundColor: Colors.red,
-              duration: Duration(seconds: 3),
-            ),
-          );
-          return;
-        } else if (status == 1) {
-          // User is deleted
-          await _authService.signOut();
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('This account has been deleted.'),
-              backgroundColor: Colors.red,
-              duration: Duration(seconds: 3),
-            ),
-          );
-          return;
-        }
-
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Welcome back, ${userCredential.user?.displayName ?? userCredential.user?.email}!'),
+            content: Text('Welcome back, $username!'),
             backgroundColor: Colors.green,
+            duration: const Duration(seconds: 1),
           ),
         );
 
         await Future.delayed(const Duration(seconds: 1));
 
         if (context.mounted) {
-          // Check if profile is completed
-          final isCompleted = await _profileService.isProfileCompleted(userId);
-          if (isCompleted) {
-            Navigator.pushReplacementNamed(context, '/dashboard');
+          if (userId.isNotEmpty) {
+            final isCompleted = await _profileService.isProfileCompleted(userId);
+            if (context.mounted) {
+              Navigator.pushReplacementNamed(
+                context,
+                isCompleted ? '/dashboard' : '/user-info',
+              );
+            }
           } else {
             Navigator.pushReplacementNamed(context, '/user-info');
           }
@@ -74,7 +57,10 @@ class LoginController extends ChangeNotifier {
     } catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString()), backgroundColor: Colors.red),
+          SnackBar(
+            content: Text(e.toString()),
+            backgroundColor: Colors.red,
+          ),
         );
       }
     } finally {
@@ -91,8 +77,9 @@ class LoginController extends ChangeNotifier {
       final userCredential = await _authService.signInWithGoogle();
 
       if (userCredential != null) {
-        await _authService.saveGoogleUser(userCredential.user!);
-        final userId = userCredential.user!.uid;
+        final sessionData = await _authService.saveGoogleUser(userCredential.user!);
+        final userId =
+            (sessionData['uid'] ?? userCredential.user?.uid ?? '').toString();
 
         // Check user status
         final status = await _profileService.getUserStatus(userId);
@@ -102,6 +89,7 @@ class LoginController extends ChangeNotifier {
           if (status == -1) {
             // User is blocked
             await _authService.signOut();
+            if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('Your account has been blocked. Please contact support.'),
@@ -113,6 +101,7 @@ class LoginController extends ChangeNotifier {
           } else if (status == 1) {
             // User is deleted
             await _authService.signOut();
+            if (!context.mounted) return;
             ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(
                 content: Text('This account has been deleted.'),
@@ -136,6 +125,7 @@ class LoginController extends ChangeNotifier {
           if (context.mounted) {
             // Check if profile is completed
             final isCompleted = await _profileService.isProfileCompleted(userId);
+            if (!context.mounted) return;
             if (isCompleted) {
               Navigator.pushReplacementNamed(context, '/dashboard');
             } else {

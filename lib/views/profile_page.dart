@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 import '../services/gym_service.dart';
+import '../services/reid_monitor_service.dart';
+import '../services/api_client.dart';
 import '../models/gym.dart';
 
 class ProfilePage extends StatefulWidget {
@@ -13,37 +14,68 @@ class ProfilePage extends StatefulWidget {
 }
 
 class _ProfilePageState extends State<ProfilePage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
   final AuthService _authService = AuthService();
   final GymService _gymService = GymService();
   String username = '';
   String email = '';
   Gym? currentGym;
   bool isLoadingGym = true;
+  bool _reidSoundEnabled = true;
 
   @override
   void initState() {
     super.initState();
     _loadUserData();
     _loadGymData();
+    _loadSoundPreference();
+  }
+
+  Future<void> _loadSoundPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (mounted) {
+      setState(() {
+        _reidSoundEnabled = prefs.getBool('reid_sound_enabled') ?? true;
+      });
+    }
   }
 
   Future<void> _loadUserData() async {
-    final currentUser = _auth.currentUser;
     final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
 
-    setState(() {
-      username = currentUser?.displayName ?? prefs.getString('username') ?? 'User';
-      email = currentUser?.email ?? prefs.getString('user_email') ?? '';
-    });
+    if ((userId ?? '').isNotEmpty) {
+      try {
+        final profileResponse = await ApiClient.getUserProfile(userId!);
+        final profile = profileResponse['data'] as Map<String, dynamic>? ?? {};
+        if (mounted) {
+          setState(() {
+            username = (profile['displayName'] ?? profile['username'] ?? prefs.getString('username') ?? 'User').toString();
+            email = (profile['email'] ?? prefs.getString('user_email') ?? '').toString();
+          });
+        }
+        return;
+      } catch (_) {}
+    }
+
+    if (mounted) {
+      setState(() {
+        username = prefs.getString('username') ?? 'User';
+        email = prefs.getString('user_email') ?? '';
+      });
+    }
   }
 
   List<Map<String, dynamic>> userGyms = [];
 
   Future<void> _loadGymData() async {
-    final currentUser = _auth.currentUser;
-    if (currentUser != null) {
-      final gyms = await _gymService.getUserGymsWithDetails(currentUser.uid);
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isEmpty) {
+      if (mounted) setState(() => isLoadingGym = false);
+      return;
+    }
+    final gyms = await _gymService.getUserGymsWithDetails(userId!);
+    if (mounted) {
       setState(() {
         userGyms = gyms;
         isLoadingGym = false;
@@ -52,8 +84,10 @@ class _ProfilePageState extends State<ProfilePage> {
   }
 
   Future<void> _handleLeaveGym(String gymId, String gymName) async {
-    final currentUser = _auth.currentUser;
-    if (currentUser == null) return;
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isEmpty) return;
+    if (!mounted) return;
 
     // Show confirmation dialog
     final confirm = await showDialog<bool>(
@@ -91,20 +125,36 @@ class _ProfilePageState extends State<ProfilePage> {
         );
       }
 
-      await _gymService.removeUserFromGym(currentUser.uid, gymId);
+      await _gymService.removeUserFromGym(userId!, gymId);
+      await _gymService.clearGymCache();
 
       if (mounted) {
         Navigator.pop(context); // Close loading dialog
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Successfully left the gym'),
-            backgroundColor: Colors.green,
-          ),
+        // Check if user has any remaining active gyms
+          final remainingGymIds = await _gymService.getUserGymIds(
+          userId,
+          forceRefresh: true,
         );
 
-        // Reload gym data
-        _loadGymData();
+        if (remainingGymIds.isEmpty && mounted) {
+          // No active gyms left — force to gym verification page
+          Navigator.pushNamedAndRemoveUntil(
+            context,
+            '/gym-verification',
+            (route) => false,
+          );
+        } else if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Successfully left the gym'),
+              backgroundColor: Colors.green,
+            ),
+          );
+
+          // Reload gym data
+          _loadGymData();
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -125,8 +175,287 @@ class _ProfilePageState extends State<ProfilePage> {
     Navigator.pushNamed(context, '/gym-verification');
   }
 
+  Future<void> _showEditProfile() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isEmpty) return;
+
+    final profileResponse = await ApiClient.getUserProfile(userId!);
+    final data = profileResponse['data'] as Map<String, dynamic>? ?? {};
+
+    final nameController = TextEditingController(
+      text: data['displayName'] ?? username,
+    );
+    final heightController = TextEditingController(
+      text: data['heightInCm'] != null ? '${data['heightInCm']}' : '',
+    );
+    final weightController = TextEditingController(
+      text: data['weightInKg'] != null ? '${data['weightInKg']}' : '',
+    );
+
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        bool isSaving = false;
+        return StatefulBuilder(
+          builder: (ctx, setSheetState) {
+            return Padding(
+              padding: EdgeInsets.only(
+                bottom: MediaQuery.of(ctx).viewInsets.bottom,
+              ),
+              child: Container(
+                decoration: const BoxDecoration(
+                  color: Color(0xFF0D4F48),
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+                ),
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(24, 16, 24, 24),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      // Handle bar
+                      Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Edit Profile',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      _editField(
+                        controller: nameController,
+                        label: 'Name',
+                        icon: Icons.person_outline,
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _editField(
+                              controller: heightController,
+                              label: 'Height (cm)',
+                              icon: Icons.height_rounded,
+                              isNumber: true,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: _editField(
+                              controller: weightController,
+                              label: 'Weight (kg)',
+                              icon: Icons.monitor_weight_outlined,
+                              isNumber: true,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 50,
+                        child: ElevatedButton(
+                          onPressed: isSaving
+                              ? null
+                              : () async {
+                                  final name = nameController.text.trim();
+                                  final height = double.tryParse(
+                                      heightController.text.trim());
+                                  final weight = double.tryParse(
+                                      weightController.text.trim());
+
+                                  if (name.isEmpty) {
+                                    ScaffoldMessenger.of(ctx).showSnackBar(
+                                      const SnackBar(
+                                        content: Text('Name cannot be empty'),
+                                        backgroundColor: Colors.red,
+                                      ),
+                                    );
+                                    return;
+                                  }
+
+                                  setSheetState(() => isSaving = true);
+
+                                  try {
+                                    await ApiClient.saveUserProfile(
+                                      displayName: name,
+                                      heightInCm: height != null && height > 0 ? height : null,
+                                      weightInKg: weight != null && weight > 0 ? weight : null,
+                                    );
+
+                                    final prefs =
+                                        await SharedPreferences.getInstance();
+                                    await prefs.setString('username', name);
+
+                                    if (mounted) {
+                                      setState(() => username = name);
+                                    }
+
+                                    if (ctx.mounted) {
+                                      Navigator.pop(ctx);
+                                    }
+                                    if (mounted) {
+                                      ScaffoldMessenger.of(context).showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Profile updated'),
+                                          backgroundColor: Colors.green,
+                                        ),
+                                      );
+                                    }
+                                  } catch (e) {
+                                    setSheetState(() => isSaving = false);
+                                    if (ctx.mounted) {
+                                      ScaffoldMessenger.of(ctx).showSnackBar(
+                                        SnackBar(
+                                          content: Text('Error: $e'),
+                                          backgroundColor: Colors.red,
+                                        ),
+                                      );
+                                    }
+                                  }
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.white,
+                            foregroundColor: const Color(0xFF0D4F48),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: isSaving
+                              ? const SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Color(0xFF0D4F48),
+                                  ),
+                                )
+                              : const Text(
+                                  'Save Changes',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    ).whenComplete(() {
+      // Delay disposal to allow widget tree to finish unmounting
+      Future.delayed(const Duration(milliseconds: 100), () {
+        nameController.dispose();
+        heightController.dispose();
+        weightController.dispose();
+      });
+    });
+  }
+
+  Widget _editField({
+    required TextEditingController controller,
+    required String label,
+    required IconData icon,
+    bool isNumber = false,
+  }) {
+    return TextFormField(
+      controller: controller,
+      keyboardType: isNumber ? TextInputType.number : TextInputType.text,
+      style: const TextStyle(color: Colors.white, fontSize: 16),
+      cursorColor: const Color(0xFFA4FEB7),
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: const TextStyle(color: Colors.white54, fontSize: 14),
+        prefixIcon: Icon(icon, color: Colors.white54, size: 20),
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.08),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFFA4FEB7), width: 1.5),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      ),
+    );
+  }
+
+  Widget _soundToggleItem() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: Colors.white.withOpacity(0.3),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFA4FEB7),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(
+              Icons.volume_up,
+              color: Color(0xFF0D4F48),
+              size: 20,
+            ),
+          ),
+          const SizedBox(width: 15),
+          const Expanded(
+            child: Text(
+              'Alert Sound',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
+                color: Colors.white,
+              ),
+            ),
+          ),
+          Switch(
+            value: _reidSoundEnabled,
+            onChanged: (value) async {
+              setState(() => _reidSoundEnabled = value);
+              await ReidMonitorService().setSoundEnabled(value);
+            },
+            activeColor: const Color(0xFFA4FEB7),
+            activeTrackColor: const Color(0xFFA4FEB7).withOpacity(0.4),
+            inactiveThumbColor: Colors.white54,
+            inactiveTrackColor: Colors.white24,
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _handleSignOut() async {
     try {
+      await ReidMonitorService().stopMonitoring();
       await _authService.signOut();
 
       // Clear local data
@@ -467,9 +796,8 @@ class _ProfilePageState extends State<ProfilePage> {
                   ),
                 ),
                 const SizedBox(height: 15),
-                _settingItem(Icons.person, 'Edit Profile', () {}),
+                _settingItem(Icons.person, 'Edit Profile', _showEditProfile),
                 _settingItem(Icons.fitness_center, 'My Goals', () {}),
-                _settingItem(Icons.monitor_weight, 'Body Measurements', () {}),
                 const SizedBox(height: 25),
 
                 const Align(
@@ -485,8 +813,9 @@ class _ProfilePageState extends State<ProfilePage> {
                 ),
                 const SizedBox(height: 15),
                 _settingItem(Icons.notifications, 'Notifications', () {}),
+                _soundToggleItem(),
                 _settingItem(Icons.lock, 'Privacy', () {}),
-                _settingItem(Icons.language, 'Language', () {}),
+                // _settingItem(Icons.language, 'Language', () {}),
                 const SizedBox(height: 25),
 
                 const Align(

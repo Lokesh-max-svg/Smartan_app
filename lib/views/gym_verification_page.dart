@@ -1,10 +1,11 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/gym_service.dart';
-import '../models/gym.dart';
 
 class GymVerificationPage extends StatefulWidget {
   const GymVerificationPage({super.key});
@@ -14,7 +15,6 @@ class GymVerificationPage extends StatefulWidget {
 }
 
 class _GymVerificationPageState extends State<GymVerificationPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
   final GymService _gymService = GymService();
   final TextEditingController _gymIdController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -26,35 +26,180 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
   bool isLoadingPending = true;
   File? _proofImage;
   final ImagePicker _imagePicker = ImagePicker();
+  Timer? _pollTimer;
 
   @override
   void initState() {
     super.initState();
-    _loadPendingGyms();
+    _setupGymPolling();
   }
 
-  Future<void> _loadPendingGyms() async {
-    final currentUser = _auth.currentUser;
-    if (currentUser != null) {
-      final allGyms = await _gymService.getUserGymsWithDetails(currentUser.uid);
-      setState(() {
-        pendingGyms = allGyms.where((gym) => gym['status'] == 2).toList();
-        isLoadingPending = false;
-      });
+  void _setupGymPolling() {
+    _refreshGyms();
+    _pollTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      _refreshGyms();
+    });
+  }
+
+  Future<void> _refreshGyms() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isEmpty || !mounted) return;
+
+    try {
+      final allGyms = await _gymService.getUserGymsWithDetails(userId!);
+      final hasApproved = allGyms.any((g) => g['status'] == 0);
+      final pendingWithDetails = allGyms.where((g) => g['status'] == 2).toList();
+
+      if (hasApproved) {
+        _pollTimer?.cancel();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Row(
+                children: [
+                  Icon(Icons.check_circle, color: Colors.white),
+                  SizedBox(width: 10),
+                  Expanded(child: Text('Gym membership approved!')),
+                ],
+              ),
+              backgroundColor: Colors.green,
+              duration: Duration(seconds: 2),
+            ),
+          );
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (mounted) {
+            Navigator.pushReplacementNamed(context, '/dashboard');
+          }
+        }
+        return;
+      }
+
+      if (mounted) {
+        setState(() {
+          pendingGyms = pendingWithDetails;
+          isLoadingPending = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error polling gym status: $e');
+      if (mounted) setState(() => isLoadingPending = false);
     }
   }
 
   @override
   void dispose() {
+    _pollTimer?.cancel();
     _gymIdController.dispose();
     _scannerController?.dispose();
     super.dispose();
   }
 
-  Future<void> _pickImage() async {
+  void _showImageSourcePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF0D4F48),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'Select Image Source',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _buildSourceOption(
+                    icon: Icons.camera_alt,
+                    label: 'Camera',
+                    onTap: () {
+                      Navigator.pop(context);
+                      _pickImage(ImageSource.camera);
+                    },
+                  ),
+                  _buildSourceOption(
+                    icon: Icons.photo_library,
+                    label: 'Gallery',
+                    onTap: () {
+                      Navigator.pop(context);
+                      _pickImage(ImageSource.gallery);
+                    },
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSourceOption({
+    required IconData icon,
+    required String label,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 60,
+            height: 60,
+            decoration: BoxDecoration(
+              color: const Color(0xFFA4FEB7),
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: Icon(icon, size: 30, color: const Color(0xFF0D4F48)),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: const TextStyle(color: Colors.white, fontSize: 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickImage(ImageSource source) async {
     try {
+      if (source == ImageSource.camera) {
+        final status = await Permission.camera.request();
+        if (!status.isGranted) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: const Text('Camera permission is required'),
+                backgroundColor: Colors.red,
+                action: status.isPermanentlyDenied
+                    ? SnackBarAction(
+                        label: 'Settings',
+                        textColor: Colors.white,
+                        onPressed: openAppSettings,
+                      )
+                    : null,
+              ),
+            );
+          }
+          return;
+        }
+      }
+
       final XFile? image = await _imagePicker.pickImage(
-        source: ImageSource.gallery,
+        source: source,
         imageQuality: 80,
       );
 
@@ -80,7 +225,7 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
     if (_proofImage == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please upload proof of membership (image)'),
+          content: Text('Please upload a profile image for recognition'),
           backgroundColor: Colors.red,
         ),
       );
@@ -92,8 +237,9 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
     });
 
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id');
+      if ((userId ?? '').isEmpty) {
         throw 'User not authenticated';
       }
 
@@ -106,7 +252,7 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
 
       // Upload proof image to Firebase Storage
       final imageUrl = await _gymService.uploadProofImage(
-        currentUser.uid,
+        userId!,
         gymId,
         _proofImage!,
       );
@@ -116,13 +262,12 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
 
       // Associate user with gym (saves to Firestore users collection with status 2 - pending)
       await _gymService.associateUserWithGym(
-        currentUser.uid,
+        userId,
         gymId,
         proofImageUrl: imageUrl,
       );
 
-      // Reload pending gyms to show the new one
-      await _loadPendingGyms();
+      // Listener will auto-update pending gyms list
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -251,6 +396,15 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
                   ),
                   const SizedBox(height: 15),
                   _buildPendingGymsTable(),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Listening for approval...',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.white70,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -351,11 +505,11 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
                 ),
                 const SizedBox(height: 20),
 
-                // Proof of Membership Section
+                // Profile Image for Embedding
                 const Align(
                   alignment: Alignment.centerLeft,
                   child: Text(
-                    'Upload Proof of Membership *',
+                    'Upload Profile Image for Recognition *',
                     style: TextStyle(
                       color: Colors.white,
                       fontSize: 14,
@@ -365,7 +519,7 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
                 ),
                 const SizedBox(height: 10),
                 GestureDetector(
-                  onTap: _pickImage,
+                  onTap: _showImageSourcePicker,
                   child: Container(
                     width: double.infinity,
                     padding: const EdgeInsets.all(20),
@@ -419,13 +573,13 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: const [
                               Icon(
-                                Icons.cloud_upload_outlined,
+                                Icons.face,
                                 color: Colors.white70,
                                 size: 40,
                               ),
                               SizedBox(height: 10),
                               Text(
-                                'Tap to upload image',
+                                'Tap to upload profile image',
                                 style: TextStyle(
                                   color: Colors.white70,
                                   fontSize: 14,
@@ -433,7 +587,7 @@ class _GymVerificationPageState extends State<GymVerificationPage> {
                               ),
                               SizedBox(height: 5),
                               Text(
-                                'JPG, JPEG, PNG',
+                                'Used for embedding generation',
                                 style: TextStyle(
                                   color: Colors.white54,
                                   fontSize: 12,

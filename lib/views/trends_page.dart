@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/trends_service.dart';
 import '../models/exercise_frequency.dart';
 import '../models/activity_day.dart';
@@ -21,7 +21,6 @@ class TrendsPage extends StatefulWidget {
 
 class _TrendsPageState extends State<TrendsPage> {
   final TrendsService _trendsService = TrendsService();
-  final FirebaseAuth _auth = FirebaseAuth.instance;
 
   TimeFilter _selectedFilter = TimeFilter.today;
   bool _isLoading = true;
@@ -46,23 +45,27 @@ class _TrendsPageState extends State<TrendsPage> {
   }
 
   Future<void> _loadTrendsData() async {
+    if (!mounted) return;
     setState(() {
       _isLoading = true;
       _error = null;
     });
 
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id') ?? '';
+      if (userId.isEmpty) {
         throw Exception('User not authenticated');
       }
 
       final data = await _trendsService.getTrendsData(
-        currentUser.uid,
+        userId,
         _selectedFilter,
         customStartDate: _customStartDate,
         customEndDate: _customEndDate,
       );
+
+      if (!mounted) return;
 
       setState(() {
         _exerciseFrequencies = data['exerciseFrequency'] as List<ExerciseFrequency>;
@@ -86,6 +89,7 @@ class _TrendsPageState extends State<TrendsPage> {
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _error = 'Failed to load trends data: $e';
         _isLoading = false;

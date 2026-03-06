@@ -5,7 +5,6 @@ import 'package:smartan_fitness/views/user_info_page.dart';
 import 'package:smartan_fitness/views/gym_verification_page.dart';
 import 'package:smartan_fitness/views/main_navigation.dart';
 import 'themes/app_theme.dart';
-import 'views/splash_page.dart';
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -14,8 +13,9 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      initialRoute: '/',
+      initialRoute: '/login',
       routes: {
+        '/': (context) => const LoginPage(),
         '/login': (context) => const LoginPage(),
         '/signup': (context) => const SignupPage(),
         '/gym-verification': (context) => const GymVerificationPage(),
@@ -24,7 +24,6 @@ class MyApp extends StatelessWidget {
       },
       title: 'Smartan Fitness',
       theme: AppTheme.lightTheme,
-      home: const SplashPage(),
     );
   }
 }

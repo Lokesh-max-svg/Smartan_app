@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../services/reid_monitor_service.dart';
+import '../services/api_client.dart';
 
 class WorkoutTrackingPage extends StatefulWidget {
   final String sessionId;
@@ -17,306 +18,235 @@ class WorkoutTrackingPage extends StatefulWidget {
   State<WorkoutTrackingPage> createState() => _WorkoutTrackingPageState();
 }
 
-class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-
+class _WorkoutTrackingPageState extends State<WorkoutTrackingPage>
+    with SingleTickerProviderStateMixin {
   Map<String, dynamic>? currentWorkout;
   List<Map<String, dynamic>> sessions = [];
   bool isLoading = true;
-  Timer? _dataRefreshTimer;
+
+  final ReidMonitorService _reidMonitorService = ReidMonitorService();
+
+  Timer? _pollingTimer;
+
+  // Cache for exercise images to avoid repeated lookups
+  final Map<String, String> _imageCache = {};
+
+  // Store latest polled responses for processing
+  List<Map<String, dynamic>> _workoutDocs = [];
+  Map<String, dynamic>? _sessionDoc;
+  List<Map<String, dynamic>> _activeSessions = [];
+
+  // Pulsing animation for reid status banner
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   @override
   void initState() {
     super.initState();
-    _loadData();
-    _startDataRefresh();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 0.4, end: 1.0).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    _reidMonitorService.startMonitoring(widget.sessionDocId);
+    _startPolling();
   }
 
   @override
   void dispose() {
-    _dataRefreshTimer?.cancel();
+    _pulseController.dispose();
+    _pollingTimer?.cancel();
     super.dispose();
   }
 
-  void _startDataRefresh() {
-    _dataRefreshTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      _loadData();
+  Future<void> _startPolling() async {
+    await _pollData();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
+      await _pollData();
     });
   }
 
-  Future<void> _loadData() async {
-    await Future.wait([
-      _loadCurrentWorkout(),
-      _loadSessions(),
-    ]);
-    setState(() {
-      isLoading = false;
-    });
-  }
+  Future<void> _pollData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getString('user_id');
+    if ((userId ?? '').isEmpty) {
+      if (mounted) setState(() => isLoading = false);
+      return;
+    }
 
-  Future<void> _loadCurrentWorkout() async {
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) return;
+      final responses = await Future.wait([
+        ApiClient.getSession(widget.sessionDocId),
+        ApiClient.getSessionWorkoutsBySessionId(widget.sessionId),
+        ApiClient.getActiveSessions(userId!),
+      ]);
 
-      debugPrint('Loading current workout for user: ${currentUser.uid}');
+      _sessionDoc = responses[0]['session'] as Map<String, dynamic>?;
+      _workoutDocs = (responses[1]['workouts'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      _activeSessions = (responses[2]['sessions'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
 
-      // Query without orderBy to avoid composite index requirement
-      final snapshot = await _firestore
-          .collection('current_workout')
-          .where('user_id', isEqualTo: currentUser.uid)
-          .get();
+      _processCurrentWorkout();
+      _processActiveSessions();
+    } catch (e) {
+      debugPrint('Error polling workout data: $e');
+      if (mounted) setState(() => isLoading = false);
+    }
+  }
 
-      if (snapshot.docs.isNotEmpty) {
-        // Sort by date in Dart to get the most recent
-        final sortedDocs = snapshot.docs.toList();
-        sortedDocs.sort((a, b) {
-          final aDate = a.data()['date'] as Timestamp?;
-          final bDate = b.data()['date'] as Timestamp?;
-          if (aDate == null && bDate == null) return 0;
-          if (aDate == null) return 1;
-          if (bDate == null) return -1;
-          return bDate.compareTo(aDate); // Descending order (newest first)
-        });
+  Future<void> _processCurrentWorkout() async {
+    if (_sessionDoc == null) return;
 
-        final doc = sortedDocs.first;
-        final workoutData = doc.data();
-        final exerciseName = workoutData['exercise_name'];
-
-        // Get the session document first to get session ID and exercises
-        final sessionDoc = await _firestore
-            .collection('sessions')
-            .doc(widget.sessionDocId)
-            .get();
-
-        int targetReps = workoutData['reps'] ?? 0;
-        int totalCurrentReps = 0;
-
-        if (sessionDoc.exists) {
-          final sessionData = sessionDoc.data();
-          final exercises = sessionData?['exercises'] as List? ?? [];
-          final sessionId = sessionData?['sessionId'] as String?;
-
-          // Sum current_reps from current_workout entries ONLY for this session
-          // Filter by session_id field in current_workout collection
-          if (sessionId != null) {
-            for (var workoutDoc in snapshot.docs) {
-              final data = workoutDoc.data();
-              final workoutSessionId = data['session_id'] as String?;
-
-              // Only count reps from entries with matching session_id
-              if (data['exercise_name'] == exerciseName &&
-                  workoutSessionId == sessionId) {
-                totalCurrentReps += (data['reps'] as int? ?? 0);
-              }
-            }
-          }
-
-          debugPrint('Total current reps for $exerciseName in session $sessionId: $totalCurrentReps');
-
-          // Find matching exercise in session
-          for (var exercise in exercises) {
-            if (exercise['name'] == exerciseName) {
-              targetReps = exercise['reps'] ?? 0;
-              debugPrint('Found target reps from session: $targetReps');
-
-              // Update the session exercise with the summed current_reps
-              final updatedExercises = exercises.map((ex) {
-                if (ex['name'] == exerciseName) {
-                  final exReps = ex['reps'] ?? 0;
-                  final isCompleted = totalCurrentReps >= exReps;
-                  return {
-                    ...ex,
-                    'current_reps': totalCurrentReps,
-                    'completed': isCompleted,
-                  };
-                }
-                return ex;
-              }).toList();
-
-              // Update the session document
-              await _firestore
-                  .collection('sessions')
-                  .doc(widget.sessionDocId)
-                  .update({'exercises': updatedExercises});
-              debugPrint('Updated session with current_reps: $totalCurrentReps');
-              break;
-            }
-          }
-        }
-
-        // Fetch exercise image from exercises collection if not present
-        String? imageUrl = workoutData['image'];
-        debugPrint('Initial image from current_workout: $imageUrl');
-        debugPrint('Exercise name to search: ${workoutData['exercise_name']}');
-
-        if ((imageUrl == null || imageUrl.isEmpty) && workoutData['exercise_name'] != null) {
-          try {
-            final exerciseNameTrim = workoutData['exercise_name'].toString().trim();
-            debugPrint('Trimmed exercise name: "$exerciseNameTrim"');
-
-            // First try exact match
-            var exerciseSnapshot = await _firestore
-                .collection('exercises')
-                .where('exercise_name', isEqualTo: exerciseNameTrim)
-                .limit(1)
-                .get();
-
-            debugPrint('Exact match query returned ${exerciseSnapshot.docs.length} documents');
-
-            // If no exact match, try case-insensitive search by fetching all and matching in Dart
-            if (exerciseSnapshot.docs.isEmpty) {
-              debugPrint('No exact match found, trying case-insensitive search...');
-              final allExercises = await _firestore
-                  .collection('exercises')
-                  .get();
-
-              debugPrint('Total exercises in collection: ${allExercises.docs.length}');
-
-              // Log first few exercise names for debugging
-              for (var i = 0; i < allExercises.docs.length && i < 5; i++) {
-                final exData = allExercises.docs[i].data();
-                debugPrint('Exercise $i: "${exData['exercise_name']}"');
-              }
-
-              if (allExercises.docs.isNotEmpty) {
-                // Find matching exercise with case-insensitive and fuzzy comparison
-                try {
-                  // First try exact case-insensitive match
-                  var matchingDoc = allExercises.docs.firstWhere(
-                    (doc) {
-                      final docExerciseName = doc.data()['exercise_name']?.toString().trim().toLowerCase() ?? '';
-                      final searchName = exerciseNameTrim.toLowerCase();
-                      final matches = docExerciseName == searchName;
-                      if (matches) {
-                        debugPrint('Found case-insensitive match: "$docExerciseName" == "$searchName"');
-                      }
-                      return matches;
-                    },
-                    orElse: () => throw StateError('No exact match'),
-                  );
-
-                  imageUrl = matchingDoc.data()['image'];
-                  debugPrint('Fetched image from case-insensitive match: $imageUrl');
-                } catch (e) {
-                  debugPrint('No exact case-insensitive match: $e');
-
-                  // Try fuzzy match (handles plural/singular differences)
-                  try {
-                    final searchName = exerciseNameTrim.toLowerCase();
-                    final matchingDoc = allExercises.docs.firstWhere(
-                      (doc) {
-                        final docExerciseName = doc.data()['exercise_name']?.toString().trim().toLowerCase() ?? '';
-
-                        // Check if one contains the other (handles plural variations)
-                        final fuzzyMatch = docExerciseName.contains(searchName) ||
-                                          searchName.contains(docExerciseName) ||
-                                          _areSimilarNames(docExerciseName, searchName);
-
-                        if (fuzzyMatch) {
-                          debugPrint('Found fuzzy match: "$docExerciseName" ~ "$searchName"');
-                        }
-                        return fuzzyMatch;
-                      },
-                    );
-
-                    imageUrl = matchingDoc.data()['image'];
-                    debugPrint('Fetched image from fuzzy match: $imageUrl');
-                  } catch (e) {
-                    debugPrint('No fuzzy match found: $e');
-                  }
-                }
-              }
-            } else if (exerciseSnapshot.docs.isNotEmpty) {
-              // Use the exact match result
-              final exerciseData = exerciseSnapshot.docs.first.data();
-              imageUrl = exerciseData['image'];
-              debugPrint('Fetched image from exact match: $imageUrl');
-            }
-
-            if (imageUrl == null || imageUrl.isEmpty) {
-              debugPrint('No matching exercise found in exercises collection');
-            }
-          } catch (e) {
-            debugPrint('Error fetching exercise image: $e');
-          }
-        }
-
-        setState(() {
-          currentWorkout = {
-            'id': doc.id,
-            ...workoutData,
-            'image': imageUrl, // Override with fetched image
-            'current_reps': totalCurrentReps, // Summed current reps
-            'reps': targetReps, // Target reps from session
-          };
-        });
-        debugPrint('Current workout loaded: ${currentWorkout?['exercise_name']}');
-        debugPrint('Current workout image URL: ${currentWorkout?['image']}');
-        debugPrint('Current reps: $totalCurrentReps, Target reps: $targetReps');
-      } else {
+    try {
+      if (_workoutDocs.isEmpty) {
         setState(() {
           currentWorkout = null;
+          isLoading = false;
         });
         debugPrint('No current workout found');
-      }
-    } catch (e) {
-      debugPrint('Error loading current workout: $e');
-    }
-  }
-
-  bool _areSimilarNames(String name1, String name2) {
-    // Remove common plural suffix 's' for comparison
-    String normalize(String name) {
-      name = name.toLowerCase().trim();
-      if (name.endsWith('s') && name.length > 1) {
-        return name.substring(0, name.length - 1);
-      }
-      return name;
-    }
-
-    final normalized1 = normalize(name1);
-    final normalized2 = normalize(name2);
-
-    return normalized1 == normalized2;
-  }
-
-  Future<void> _loadSessions() async {
-    try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) return;
-
-      debugPrint('Loading sessions for user: ${currentUser.uid}');
-
-      final snapshot = await _firestore
-          .collection('sessions')
-          .where('userId', isEqualTo: currentUser.uid)
-          .where('status', isEqualTo: 'Active')
-          .get();
-
-      List<Map<String, dynamic>> loadedSessions = [];
-
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        loadedSessions.add({
-          'id': doc.id,
-          'sessionId': data['sessionId'] ?? doc.id,
-          'status': data['status'] ?? 'Active',
-          'createdAt': data['createdAt'],
-          'date': data['date'],
-          'exercises': data['exercises'] ?? [],
-        });
+        return;
       }
 
-      setState(() {
-        sessions = loadedSessions;
+      // Sort by date in Dart to get the most recent
+      final sortedDocs = _workoutDocs.toList();
+      sortedDocs.sort((a, b) {
+        final aDate = DateTime.tryParse((a['date'] ?? '').toString());
+        final bDate = DateTime.tryParse((b['date'] ?? '').toString());
+        if (aDate == null && bDate == null) return 0;
+        if (aDate == null) return 1;
+        if (bDate == null) return -1;
+        return bDate.compareTo(aDate);
       });
 
-      debugPrint('Total sessions loaded: ${sessions.length}');
+      final doc = sortedDocs.first;
+      final workoutData = doc;
+      final exerciseName = workoutData['exercise_name'];
+
+      int targetReps = workoutData['reps'] ?? 0;
+      int totalCurrentReps = 0;
+
+      final exercises = (_sessionDoc?['exercises'] as List? ?? []);
+
+        // Sum current_reps from current_workout entries for this session
+        for (var workoutDoc in _workoutDocs) {
+          final data = workoutDoc;
+          if (data['exercise_name'] == exerciseName) {
+            totalCurrentReps += (data['reps'] as int? ?? 0);
+          }
+        }
+
+        debugPrint('Total current reps for $exerciseName: $totalCurrentReps');
+
+        // Find matching exercise in session for target reps
+        for (var exercise in exercises) {
+          if (exercise['name'] == exerciseName) {
+            targetReps = exercise['reps'] ?? 0;
+            debugPrint('Found target reps from session: $targetReps');
+            break;
+          }
+        }
+      // Fetch exercise image (with caching to avoid repeated lookups)
+      String? imageUrl = workoutData['image'];
+
+      if ((imageUrl == null || imageUrl.isEmpty) && exerciseName != null) {
+        final cached = _imageCache[exerciseName.toString()];
+        if (cached != null) {
+          imageUrl = cached;
+        } else {
+          imageUrl = await _fetchExerciseImage(exerciseName.toString());
+          if (imageUrl != null && imageUrl.isNotEmpty) {
+            _imageCache[exerciseName.toString()] = imageUrl;
+          }
+        }
+      }
+
+      if (!mounted) return;
+
+      setState(() {
+        currentWorkout = {
+          'id': doc['id'],
+          ...workoutData,
+          'image': imageUrl,
+          'current_reps': totalCurrentReps,
+          'reps': targetReps,
+        };
+        isLoading = false;
+      });
+      debugPrint('Current workout loaded: ${currentWorkout?['exercise_name']}');
+      debugPrint('Current reps: $totalCurrentReps, Target reps: $targetReps');
     } catch (e) {
-      debugPrint('Error loading sessions: $e');
+      debugPrint('Error processing current workout: $e');
+      if (mounted) setState(() => isLoading = false);
     }
+  }
+
+  Future<String?> _fetchExerciseImage(String exerciseName) async {
+    try {
+      final response = await ApiClient.getExerciseImage(exerciseName);
+      return response['image'] as String?;
+    } catch (e) {
+      debugPrint('Error fetching exercise image: $e');
+      return null;
+    }
+  }
+
+  void _processActiveSessions() {
+    if (_activeSessions.isEmpty) {
+      if (mounted) {
+        setState(() {
+          sessions = [];
+        });
+      }
+      return;
+    }
+
+    List<Map<String, dynamic>> loadedSessions = [];
+
+    for (var data in _activeSessions) {
+      final sessionId = data['sessionId'] as String?;
+      List<dynamic> exercises = data['exercises'] as List? ?? [];
+
+      // For the current session, compute current_reps from workout listener data
+      if (sessionId == widget.sessionId) {
+        exercises = exercises.map((exercise) {
+          final exerciseName = exercise['name'];
+          int totalCurrentReps = 0;
+
+          for (var wData in _workoutDocs) {
+            if (wData['exercise_name'] == exerciseName) {
+              totalCurrentReps += (wData['reps'] as int? ?? 0);
+            }
+          }
+
+          final targetReps = exercise['reps'] ?? 0;
+          return {
+            ...Map<String, dynamic>.from(exercise),
+            'current_reps': totalCurrentReps,
+            'completed': totalCurrentReps >= targetReps,
+          };
+        }).toList();
+      }
+
+      loadedSessions.add({
+        'id': data['id'],
+        'sessionId': sessionId ?? data['id'],
+        'status': data['status'] ?? 'Active',
+        'createdAt': data['createdAt'],
+        'date': data['date'],
+        'exercises': exercises,
+      });
+    }
+
+    setState(() {
+      sessions = loadedSessions;
+    });
+
+    debugPrint('Total sessions loaded: ${sessions.length}');
   }
 
   Future<void> _endSession() async {
@@ -357,140 +287,103 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
 
       if (confirmed != true) return;
 
-      // Get session document to calculate final stats before ending
-      final sessionDoc = await _firestore
-          .collection('sessions')
-          .doc(widget.sessionDocId)
-          .get();
+      if (!mounted) return;
 
-      if (!sessionDoc.exists) {
-        throw Exception('Session not found');
-      }
+      // Show loading immediately after confirmation
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => PopScope(
+          canPop: false,
+          child: AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            content: const Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(color: Color(0xFF0D4F48)),
+                SizedBox(height: 20),
+                Text(
+                  'Closing session...',
+                  style: TextStyle(fontSize: 16),
+                ),
+                SizedBox(height: 8),
+                Text(
+                  'Please wait while we save your workout data',
+                  style: TextStyle(fontSize: 12, color: Colors.grey),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
 
-      final sessionData = sessionDoc.data();
+      // Use cached session data from listener instead of re-fetching
+      final sessionData = _sessionDoc;
       final exercises = sessionData?['exercises'] as List? ?? [];
-      final sessionId = sessionData?['sessionId'] as String?;
 
-      if (sessionId != null && exercises.isNotEmpty) {
-        // Get all current_workout entries for this user
-        final currentUser = _auth.currentUser;
-        if (currentUser != null) {
-          final workoutSnapshot = await _firestore
-              .collection('current_workout')
-              .where('user_id', isEqualTo: currentUser.uid)
-              .get();
+      if (exercises.isNotEmpty) {
+        // Use cached workout docs from listener, filtered by session_id
+        final workoutDocs = _workoutDocs;
 
-          // Update each exercise with final summed current_reps
-          final updatedExercises = exercises.map((exercise) {
-            final exerciseName = exercise['name'];
-            int totalCurrentReps = 0;
+        // Update each exercise with final summed current_reps
+        final updatedExercises = exercises.map((exercise) {
+          final exerciseName = exercise['name'];
+          int totalCurrentReps = 0;
 
-            // Sum reps from current_workout entries for this session and exercise
-            for (var workoutDoc in workoutSnapshot.docs) {
-              final data = workoutDoc.data();
-              final workoutSessionId = data['session_id'] as String?;
-
-              if (data['exercise_name'] == exerciseName &&
-                  workoutSessionId == sessionId) {
-                totalCurrentReps += (data['reps'] as int? ?? 0);
-              }
+          for (var workoutDoc in workoutDocs) {
+            final data = workoutDoc;
+            if (data['exercise_name'] == exerciseName) {
+              totalCurrentReps += (data['reps'] as int? ?? 0);
             }
+          }
 
-            final targetReps = exercise['reps'] ?? 0;
-            final isCompleted = totalCurrentReps >= targetReps;
+          final targetReps = exercise['reps'] ?? 0;
+          final isCompleted = totalCurrentReps >= targetReps;
 
-            return {
-              ...exercise,
-              'current_reps': totalCurrentReps,
-              'completed': isCompleted,
-            };
-          }).toList();
+          return {
+            ...exercise,
+            'current_reps': totalCurrentReps,
+            'completed': isCompleted,
+          };
+        }).toList();
 
-          // Update session with final exercise data and mark as Completed
-          await _firestore
-              .collection('sessions')
-              .doc(widget.sessionDocId)
-              .update({
-            'exercises': updatedExercises,
-            'status': 'Closed',
-            'endedAt': FieldValue.serverTimestamp(),
-          });
+        // Update session with final exercise data and mark as Closed
+        await ApiClient.closeSession(
+          sessionId: widget.sessionDocId,
+          exercises: updatedExercises
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList(),
+        );
 
-          debugPrint('Session ${widget.sessionId} ended with final stats updated');
-        } else {
-          // No current user, just update status
-          await _firestore
-              .collection('sessions')
-              .doc(widget.sessionDocId)
-              .update({
-            'status': 'Closed',
-            'endedAt': FieldValue.serverTimestamp(),
-          });
-        }
+        debugPrint('Session ${widget.sessionId} ended with final stats updated');
       } else {
-        // No exercises or sessionId, just update status
-        await _firestore
-            .collection('sessions')
-            .doc(widget.sessionDocId)
-            .update({
-          'status': 'Closed',
-          'endedAt': FieldValue.serverTimestamp(),
-        });
+        // No exercises, just update status
+        await ApiClient.closeSession(sessionId: widget.sessionDocId);
       }
 
       debugPrint('Session ${widget.sessionId} ended successfully');
 
+      // Stop reid monitoring since session is closed
+      await _reidMonitorService.stopMonitoring();
+
       if (mounted) {
-        // Show closing dialog with spinner
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => PopScope(
-            canPop: false,
-            child: AlertDialog(
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-              ),
-              content: const Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  CircularProgressIndicator(color: Color(0xFF0D4F48)),
-                  SizedBox(height: 20),
-                  Text(
-                    'Closing session...',
-                    style: TextStyle(fontSize: 16),
-                  ),
-                  SizedBox(height: 8),
-                  Text(
-                    'Please wait while we save your workout data',
-                    style: TextStyle(fontSize: 12, color: Colors.grey),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
+        // Close the loading dialog
+        Navigator.of(context).pop();
+
+        // Show success message
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Session ended successfully'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
           ),
         );
 
-        // Wait for Firestore to sync before navigating
-        await Future.delayed(const Duration(seconds: 3));
-
-        if (mounted) {
-          // Close the loading dialog
-          Navigator.of(context).pop();
-
-          // Show success message
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Session ended successfully'),
-              backgroundColor: Colors.green,
-              duration: Duration(seconds: 2),
-            ),
-          );
-
-          // Navigate back
-          Navigator.of(context).pop();
-        }
+        // Navigate back
+        Navigator.of(context).pop();
       }
     } catch (e) {
       debugPrint('Error ending session: $e');
@@ -570,6 +463,140 @@ class _WorkoutTrackingPageState extends State<WorkoutTrackingPage> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // ReID Status Banner
+                ValueListenableBuilder<int>(
+                  valueListenable: _reidMonitorService.reidStatus,
+                  builder: (context, reidStatus, _) {
+                    return ValueListenableBuilder<bool>(
+                      valueListenable: _reidMonitorService.alertDismissed,
+                      builder: (context, alertDismissed, _) {
+                        return AnimatedContainer(
+                          duration: const Duration(milliseconds: 400),
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                          decoration: BoxDecoration(
+                            color: reidStatus == 1
+                                ? Colors.green.shade50
+                                : Colors.orange.shade50,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: reidStatus == 1 ? Colors.green : Colors.orange,
+                              width: 1.5,
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Icon(
+                                    reidStatus == 1
+                                        ? Icons.visibility
+                                        : Icons.visibility_off,
+                                    color: reidStatus == 1 ? Colors.green : Colors.orange,
+                                    size: 22,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          reidStatus == 1
+                                              ? 'You are being tracked'
+                                              : 'Not yet identified',
+                                          style: TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.bold,
+                                            color: reidStatus == 1
+                                                ? Colors.green.shade800
+                                                : Colors.orange.shade800,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          reidStatus == 1
+                                              ? 'Camera system has identified you'
+                                              : 'Move into the camera view to be recognised',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: reidStatus == 1
+                                                ? Colors.green.shade700
+                                                : Colors.orange.shade700,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  // Pulsing dot when waiting, solid when tracked
+                                  reidStatus == 1
+                                      ? Container(
+                                          width: 10,
+                                          height: 10,
+                                          decoration: const BoxDecoration(
+                                            color: Colors.green,
+                                            shape: BoxShape.circle,
+                                          ),
+                                        )
+                                      : AnimatedBuilder(
+                                          animation: _pulseAnimation,
+                                          builder: (context, child) {
+                                            return Container(
+                                              width: 10,
+                                              height: 10,
+                                              decoration: BoxDecoration(
+                                                color: Colors.orange.withValues(alpha: _pulseAnimation.value),
+                                                shape: BoxShape.circle,
+                                                boxShadow: [
+                                                  BoxShadow(
+                                                    color: Colors.orange.withValues(alpha: _pulseAnimation.value * 0.5),
+                                                    blurRadius: 6,
+                                                    spreadRadius: 2,
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                ],
+                              ),
+                              // Dismiss alert button
+                              if (reidStatus == 0 && !alertDismissed)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 8),
+                                  child: GestureDetector(
+                                    onTap: _reidMonitorService.dismissAlert,
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.end,
+                                      children: [
+                                        Icon(
+                                          Icons.volume_off,
+                                          size: 16,
+                                          color: Colors.orange.shade700,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Dismiss alert',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                            color: Colors.orange.shade700,
+                                            decoration: TextDecoration.underline,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
+                const SizedBox(height: 20),
+
                 // Current Workout Section
                 const Text(
                   'Current Workout',

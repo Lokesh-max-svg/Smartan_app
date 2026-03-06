@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import '../services/api_client.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -12,8 +11,6 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   String username = '';
   bool workout = true;
   Color progress1 = Colors.green;
@@ -92,102 +89,30 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _loadUserData() async {
-    final currentUser = _auth.currentUser;
     final prefs = await SharedPreferences.getInstance();
 
     setState(() {
-      username =
-          currentUser?.displayName ?? prefs.getString('username') ?? 'User';
+      username = prefs.getString('username') ?? 'User';
     });
   }
 
   Future<void> _loadTodayWorkouts() async {
     try {
-      final currentUser = _auth.currentUser;
-      if (currentUser == null) {
+      final prefs = await SharedPreferences.getInstance();
+      final userId = prefs.getString('user_id');
+      if ((userId ?? '').isEmpty) {
         setState(() {
           isLoading = false;
         });
         return;
       }
-
-      debugPrint('Loading workouts for user: ${currentUser.uid}, date: $todayDate');
-
-      // Query workout plans for this user
-      final snapshot = await _firestore
-          .collection('workoutPlans')
-          .where('userId', isEqualTo: currentUser.uid)
-          .get();
-
-      debugPrint('Found ${snapshot.docs.length} workout plans for user');
-
-      List<Map<String, dynamic>> exercises = [];
-
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-
-        debugPrint('Workout plan document ID: ${doc.id}');
-        debugPrint('Has workouts field: ${data['workouts'] != null}');
-
-        // Check if workouts map exists and has today's date
-        if (data['workouts'] != null && data['workouts'] is Map) {
-          final workoutsMap = data['workouts'] as Map<String, dynamic>;
-
-          debugPrint('Available workout dates: ${workoutsMap.keys.toList()}');
-          debugPrint('Looking for date: $todayDate');
-          debugPrint('Contains key check: ${workoutsMap.containsKey(todayDate)}');
-
-          // Try all possible date formats
-          var foundDate = false;
-          for (var dateKey in workoutsMap.keys) {
-            debugPrint('Checking date key: "$dateKey" (type: ${dateKey.runtimeType})');
-            if (dateKey.toString() == todayDate) {
-              foundDate = true;
-              final todayWorkouts = workoutsMap[dateKey];
-
-              debugPrint('Found matching date! Type: ${todayWorkouts.runtimeType}');
-
-              if (todayWorkouts is List) {
-                debugPrint('Found ${todayWorkouts.length} exercises for $dateKey');
-
-                for (var exercise in todayWorkouts) {
-                  if (exercise is Map<String, dynamic>) {
-                    debugPrint('Adding exercise: ${exercise['name']}, muscle: ${exercise['muscle']}, muscle_name: ${exercise['muscle_name']}');
-                    exercises.add({
-                      'id': exercise['id']?.toString() ?? '',
-                      'name': exercise['name'] ?? 'Unknown Exercise',
-                      'muscle': exercise['muscle_name'] ?? exercise['muscle'] ?? 'Unknown',
-                      'category': exercise['muscle_name'] ?? exercise['muscle'] ?? 'Unknown',
-                      'difficulty': exercise['difficulty'] ?? 'Medium',
-                      'sets': exercise['sets'] ?? 0,
-                      'reps': exercise['reps'] ?? 0,
-                      'duration': exercise['duration'] ?? '',
-                      'image': exercise['image'] ?? '',
-                      'muscleId': exercise['muscleId'] ?? 0,
-                      'instanceId': exercise['instanceId'] ?? '',
-                      'addedAt': exercise['addedAt'] ?? '',
-                    });
-                  }
-                }
-              }
-              break;
-            }
-          }
-
-          if (!foundDate) {
-            debugPrint('❌ No matching date found for: $todayDate');
-            debugPrint('Available dates were: ${workoutsMap.keys.toList()}');
-          }
-        } else {
-          debugPrint('❌ No workouts map in document');
-        }
-      }
-
-      debugPrint('Total exercises loaded: ${exercises.length}');
-
-      // Debug: Show all unique muscle categories found
-      final uniqueMuscles = exercises.map((e) => e['muscle']).toSet();
-      debugPrint('Unique muscle categories found: $uniqueMuscles');
+      final response = await ApiClient.getWorkoutPlanForDate(
+        userId: userId!,
+        date: todayDate,
+      );
+      final exercises = (response['exercises'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
 
       setState(() {
         allExercises = exercises;
@@ -404,20 +329,16 @@ class _HomePageState extends State<HomePage> {
 
                           Color difficultyColor;
                           String difficultyText;
-                          IconData difficultyIcon;
 
                           if (difficulty == "easy") {
                             difficultyColor = Colors.green;
                             difficultyText = 'Easy';
-                            difficultyIcon = Icons.sentiment_satisfied;
                           } else if (difficulty == "medium") {
                             difficultyColor = Colors.orange;
                             difficultyText = 'Medium';
-                            difficultyIcon = Icons.sentiment_neutral;
                           } else {
                             difficultyColor = Colors.red;
                             difficultyText = 'Hard';
-                            difficultyIcon = Icons.sentiment_very_dissatisfied;
                           }
 
                           return Container(

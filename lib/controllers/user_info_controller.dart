@@ -1,9 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
-import '../models/user_info.dart';
+import '../services/auth_service.dart';
 
 class UserInfoController extends ChangeNotifier {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final AuthService _authService = AuthService();
 
   bool isLoading = false;
   String selectedExpertise = 'Novice';
@@ -45,27 +44,15 @@ class UserInfoController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final userInfo = UserInfo(
+      // Save user info to backend and get response with user status
+      final response = await _authService.saveUserProfileViaBackend(
         userId: userId,
         heightInCm: height,
         weightInKg: weight,
         gymExpertise: selectedExpertise,
         hasHealthIssues: hasHealthIssues,
         healthIssuesDescription: hasHealthIssues ? healthIssuesDescription : null,
-        createdAt: DateTime.now(),
       );
-
-      // Save user info along with user_type and status
-      final dataToSave = {
-        ...userInfo.toJson(),
-        'user_type': 'user',
-        'status': 0, // 0 = enabled
-      };
-
-      await _firestore
-          .collection('users')
-          .doc(userId)
-          .set(dataToSave, SetOptions(merge: true));
 
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -79,7 +66,19 @@ class UserInfoController extends ChangeNotifier {
         await Future.delayed(const Duration(seconds: 1));
 
         if (context.mounted) {
-          Navigator.pushReplacementNamed(context, '/dashboard');
+          // Get user status from backend response
+          final userStatus = response['status'] ?? response['user']?['status'] ?? 0;
+          
+          if (userStatus == 2) {
+            // Navigate to gym verification page if status is 2
+            Navigator.pushReplacementNamed(context, '/gym-verification');
+          } else if (userStatus == 0) {
+            // Push directly to dashboard if status is 0 (enabled/active)
+            Navigator.pushReplacementNamed(context, '/dashboard');
+          } else {
+            // Default to dashboard for other statuses
+            Navigator.pushReplacementNamed(context, '/dashboard');
+          }
         }
       }
     } catch (e) {

@@ -81,16 +81,6 @@ class GymService {
     }
   }
 
-  /// Mark user as left from a gym
-  Future<void> removeUserFromGym(String userId, String gymId) async {
-    try {
-      await ApiClient.leaveGym(userId: userId, gymId: gymId);
-      await _updateLocalGymCache(userId);
-    } catch (e) {
-      throw 'Error leaving gym: $e';
-    }
-  }
-
   /// Get all active gym IDs for user
   Future<List<String>> getUserGymIds(String userId, {bool forceRefresh = false}) async {
     try {
@@ -142,6 +132,58 @@ class GymService {
       print('Error updating local gym cache: $e');
     }
   }
+      if (!forceRefresh) {
+        // Check locally first
+        final prefs = await SharedPreferences.getInstance();
+        final localGymIds = prefs.getString('user_gym_ids');
+        if (localGymIds != null && localGymIds.isNotEmpty) {
+          final ids = localGymIds.split(',').where((id) => id.isNotEmpty).toList();
+          print('Found local gym IDs: $ids');
+          return ids;
+        }
+      }
+
+      // Check Firestore
+      print('Checking Firestore for gym IDs...');
+      final userDoc = await _firestore.collection('users').doc(userId).get();
+
+      if (userDoc.exists) {
+        final data = userDoc.data();
+        final gyms = data?['gyms'] as List<dynamic>?;
+
+        if (gyms != null && gyms.isNotEmpty) {
+          // Get active and pending gyms (status = 0 or 2)
+          final activeGymIds = gyms
+              .where((g) => g['status'] == 0 || g['status'] == 2)
+              .map((g) => g['gymId'].toString())
+              .toList();
+
+          print('Firestore active/pending gym IDs: $activeGymIds');
+
+          // Update local cache
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString('user_gym_ids', activeGymIds.join(','));
+
+          return activeGymIds;
+        } else {
+          // Clear local cache if no gyms in Firestore
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.remove('user_gym_ids');
+          return [];
+        }
+      }
+
+      print('User document does not exist in Firestore');
+      // Clear local cache if user doc doesn't exist
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('user_gym_ids');
+
+      return [];
+    } catch (e) {
+      print('Error getting gym IDs: $e');
+      return [];
+    }
+  }
 
   /// Check if user is already associated with a gym (legacy method for backward compatibility)
   @Deprecated('Use getUserGymIds instead')
@@ -165,30 +207,78 @@ class GymService {
     }
   }
 
+  /// Remove user from specific gym (update status to -1 = left)
+  Future<void> removeUserFromGym(String userId, String gymId) async {
+    try {
+      print('Removing user $userId from gym $gymId');
+
+      // Get current user document
+      final userDoc = await _firestore.collection('users').doc(userId).get();
+      final data = userDoc.data() ?? {};
+
+      // Get existing gyms array
+      List<Map<String, dynamic>> gyms = [];
+      if (data['gyms'] != null) {
+        gyms = List<Map<String, dynamic>>.from(data['gyms']);
+      }
+
+      // Find and update the specific gym's status
+      final gymIndex = gyms.indexWhere((g) => g['gymId'] == gymId);
+      if (gymIndex != -1) {
+        gyms[gymIndex]['status'] = -1; // -1 = left
+        gyms[gymIndex]['leftAt'] = DateTime.now().toIso8601String();
+      }
+
+      // Update user document (keeps height, weight, and all other data)
+      await _firestore.collection('users').doc(userId).update({
+        'gyms': gyms,
+      });
+
+      print('User removed from gym in Firestore');
+
+      // Update local cache (include both active and pending)
+      final prefs = await SharedPreferences.getInstance();
+      final activeGymIds = gyms.where((g) => g['status'] == 0 || g['status'] == 2).map((g) => g['gymId'].toString()).toList();
+      await prefs.setString('user_gym_ids', activeGymIds.join(','));
+
+      print('User successfully removed from gym');
+    } catch (e) {
+      print('Error removing user from gym: $e');
+      throw 'Error leaving gym: $e';
+    }
+  }
+
   /// Get all gym details for the user (active and inactive)
   Future<List<Map<String, dynamic>>> getUserGymsWithDetails(String userId) async {
     try {
-      final response = await ApiClient.getUserGyms(
-        userId,
-        activeOnly: false,
-        includeDetails: true,
-      );
+      final userDoc = await _firestore.collection('users').doc(userId).get();
+      final data = userDoc.data() ?? {};
 
-      final gymsDetailed = (response['gymsDetailed'] as List<dynamic>?) ?? [];
+      final gyms = data['gyms'] as List<dynamic>?;
+      if (gyms == null || gyms.isEmpty) {
+        return [];
+      }
 
-      return gymsDetailed
-          .whereType<Map<String, dynamic>>()
-          .where((entry) => entry['gym'] is Map<String, dynamic>)
-          .map((entry) {
-        final gymData = entry['gym'] as Map<String, dynamic>;
-        return {
-          'gym': Gym.fromJson(gymData),
-          'status': entry['status'],
-          'joinedAt': entry['joinedAt'],
-          'leftAt': entry['leftAt'],
-          'rejoinedAt': entry['rejoinedAt'],
-        };
-      }).toList();
+      List<Map<String, dynamic>> gymsWithDetails = [];
+
+      for (var gymEntry in gyms) {
+        final gymId = gymEntry['gymId'];
+        final status = gymEntry['status'];
+
+        // Fetch gym details
+        final gym = await validateGymId(gymId);
+        if (gym != null) {
+          gymsWithDetails.add({
+            'gym': gym,
+            'status': status,
+            'joinedAt': gymEntry['joinedAt'],
+            'leftAt': gymEntry['leftAt'],
+            'rejoinedAt': gymEntry['rejoinedAt'],
+          });
+        }
+      }
+
+      return gymsWithDetails;
     } catch (e) {
       print('Error getting user gyms with details: $e');
       return [];

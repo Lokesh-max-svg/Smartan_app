@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import '../services/api_client.dart';
 
 // Exercise Model
 class Exercise {
@@ -25,11 +25,10 @@ class Exercise {
     this.muscleId,
   });
 
-  factory Exercise.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+  factory Exercise.fromMap(Map<String, dynamic> data) {
     final imageUrl = data['image'] as String?;
     return Exercise(
-      id: doc.id,
+      id: (data['id'] ?? '').toString(),
       name: data['exercise_name'] ?? 'Unnamed Exercise',
       description: data['description'],
       muscleCategory: data['muscleCategory'],
@@ -50,10 +49,10 @@ class TutorialPage extends StatefulWidget {
 }
 
 class _TutorialPageState extends State<TutorialPage> {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final TextEditingController _searchController = TextEditingController();
   String _selectedMuscleType = 'All';
   List<String> _muscleTypes = ['All'];
+  List<Exercise> _allExercises = [];
   bool _isLoading = true;
   String _searchQuery = '';
 
@@ -81,28 +80,19 @@ class _TutorialPageState extends State<TutorialPage> {
 
   Future<void> _loadMuscleTypes() async {
     try {
-      debugPrint('Loading exercises from Firebase...');
-      final snapshot = await _firestore.collection('exercises').get();
-      debugPrint('Found ${snapshot.docs.length} exercises');
-
-      if (snapshot.docs.isEmpty) {
-        debugPrint('No exercises found in Firebase. Check:');
-        debugPrint('1. Firestore collection path: /exercises');
-        debugPrint('2. Firestore security rules');
-        debugPrint('3. Add sample exercises to Firebase Console');
-      }
+      final response = await ApiClient.getExercises();
+      final raw = (response['exercises'] as List<dynamic>? ?? [])
+          .whereType<Map<String, dynamic>>()
+          .toList();
+      final exercises = raw.map(Exercise.fromMap).toList();
 
       final Set<String> muscleTypes = {'All'};
 
-      for (var doc in snapshot.docs) {
-        final data = doc.data();
-        debugPrint('Exercise: ${data['exercise_name']}, muscle_name: ${data['muscle_name']}, muscleCategory: ${data['muscleCategory']}');
-        if (data['muscle_name'] != null) {
-          muscleTypes.add(data['muscle_name']);
+      for (final exercise in exercises) {
+        if (exercise.muscleName != null && exercise.muscleName!.isNotEmpty) {
+          muscleTypes.add(exercise.muscleName!);
         }
       }
-
-      debugPrint('Available muscle types: $muscleTypes');
 
       // Sort muscle types with "All" first, then alphabetically
       final muscleTypesList = muscleTypes.toList();
@@ -111,6 +101,7 @@ class _TutorialPageState extends State<TutorialPage> {
       muscleTypesList.insert(0, 'All');
 
       setState(() {
+        _allExercises = exercises;
         _muscleTypes = muscleTypesList;
         _selectedMuscleType = 'All';
         _isLoading = false;
@@ -143,32 +134,29 @@ class _TutorialPageState extends State<TutorialPage> {
     }
   }
 
-  Stream<List<Exercise>> _getExercises() {
-    Query query = _firestore.collection('exercises');
+  List<Exercise> _getExercises() {
+    var exercises = _allExercises;
 
     if (_selectedMuscleType != 'All') {
-      query = query.where('muscle_name', isEqualTo: _selectedMuscleType);
+      exercises = exercises
+          .where((exercise) => exercise.muscleName == _selectedMuscleType)
+          .toList();
     }
 
-    return query.snapshots().map((snapshot) {
-      var exercises = snapshot.docs.map((doc) => Exercise.fromFirestore(doc)).toList();
+    if (_searchQuery.isNotEmpty) {
+      exercises = exercises.where((exercise) {
+        final name = exercise.name.toLowerCase();
+        final muscleName = exercise.muscleName?.toLowerCase() ?? '';
+        final category = exercise.muscleCategory?.toLowerCase() ?? '';
+        final difficulty = exercise.difficulty?.toLowerCase() ?? '';
+        return name.contains(_searchQuery) ||
+               muscleName.contains(_searchQuery) ||
+               category.contains(_searchQuery) ||
+               difficulty.contains(_searchQuery);
+      }).toList();
+    }
 
-      // Apply search filter
-      if (_searchQuery.isNotEmpty) {
-        exercises = exercises.where((exercise) {
-          final name = exercise.name.toLowerCase();
-          final muscleName = exercise.muscleName?.toLowerCase() ?? '';
-          final category = exercise.muscleCategory?.toLowerCase() ?? '';
-          final difficulty = exercise.difficulty?.toLowerCase() ?? '';
-          return name.contains(_searchQuery) ||
-                 muscleName.contains(_searchQuery) ||
-                 category.contains(_searchQuery) ||
-                 difficulty.contains(_searchQuery);
-        }).toList();
-      }
-
-      return exercises;
-    });
+    return exercises;
   }
 
   Color _getDifficultyColor(String? difficulty) {
@@ -348,10 +336,9 @@ class _TutorialPageState extends State<TutorialPage> {
             // Exercise Count
             Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
-              child: StreamBuilder<List<Exercise>>(
-                stream: _getExercises(),
-                builder: (context, snapshot) {
-                  final count = snapshot.data?.length ?? 0;
+              child: Builder(
+                builder: (context) {
+                  final count = _getExercises().length;
                   return Text(
                     '$count ${count == 1 ? 'Exercise' : 'Exercises'}',
                     style: TextStyle(
@@ -366,54 +353,9 @@ class _TutorialPageState extends State<TutorialPage> {
 
             // Exercise List
             Expanded(
-              child: StreamBuilder<List<Exercise>>(
-                stream: _getExercises(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(
-                      child: CircularProgressIndicator(
-                        color: primaryColor,
-                      ),
-                    );
-                  }
-
-                  if (snapshot.hasError) {
-                    return Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(20.0),
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              Icons.error_outline,
-                              size: 64,
-                              color: Colors.red.shade300,
-                            ),
-                            const SizedBox(height: 16),
-                            Text(
-                              'Error loading exercises',
-                              style: TextStyle(
-                                fontSize: 18,
-                                color: Colors.red.shade700,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              '${snapshot.error}',
-                              style: const TextStyle(
-                                fontSize: 14,
-                                color: Colors.red,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
-                  }
-
-                  final exercises = snapshot.data ?? [];
+              child: Builder(
+                builder: (context) {
+                  final exercises = _getExercises();
 
                   if (exercises.isEmpty) {
                     return Center(
